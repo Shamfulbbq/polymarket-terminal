@@ -12,7 +12,18 @@
     "mm-dev": "DRY_RUN=true nodemon --ignore 'data/*.json' src/mm.js",
     "sniper": "DRY_RUN=false node src/sniper.js",
     "sniper-sim": "DRY_RUN=true node src/sniper.js",
-    "sniper-dev": "DRY_RUN=true nodemon --ignore 'data/*.json' src/sniper.js"
+    "sniper-dev": "DRY_RUN=true nodemon --ignore 'data/*.json' src/sniper.js",
+    "favorite": "node src/sports-favorite.js",
+    "favorite-sim": "node src/sports-favorite.js",
+    "backtest": "node src/backtest/run.js",
+    "outcomes": "node scripts/backfill-outcomes.js",
+    "outcomes-report": "node scripts/backfill-outcomes.js --report-only",
+    "directional": "DRY_RUN=false node src/directionalSniper.js",
+    "directional-sim": "DRY_RUN=true node src/directionalSniper.js",
+    "tailsweep": "DRY_RUN=false node src/tailSweep.js",
+    "tailsweep-sim": "DRY_RUN=true node src/tailSweep.js",
+    "lp": "node src/lp.js",
+    "lp:paper": "LP_PAPER=true node src/lp_paper.js"
   },
   "keywords": [
     "polymarket",
