@@ -1,5 +1,6 @@
 import { ClobClient } from '@polymarket/clob-client';
 import { Wallet } from 'ethers';
+import { performance } from 'perf_hooks';
 import config from '../config/index.js';
 import logger from '../utils/logger.js';
 
@@ -65,6 +66,45 @@ export function getSigner() {
         throw new Error('Signer not initialized. Call initClient() first.');
     }
     return signer;
+}
+
+/**
+ * Submit an order using the warm client while capturing high-resolution timing.
+ * The underlying client signs and posts inside one call, so this measures the
+ * full local-submit to exchange-ack round trip.
+ */
+export async function submitOrderTimed(orderArgs, marketArgs, orderType) {
+    const client = getClient();
+    const submitStartedAt = new Date().toISOString();
+    const submitStartedPerfMs = performance.now();
+
+    try {
+        const res = await client.createAndPostOrder(orderArgs, marketArgs, orderType);
+        const submitAckAt = new Date().toISOString();
+        const submitAckPerfMs = performance.now();
+
+        return {
+            res,
+            timing: {
+                submitStartedAt,
+                submitAckAt,
+                submitStartedPerfMs,
+                submitAckPerfMs,
+                submitRoundTripMs: submitAckPerfMs - submitStartedPerfMs,
+            },
+        };
+    } catch (err) {
+        const submitFailedAt = new Date().toISOString();
+        const submitFailedPerfMs = performance.now();
+        err.submitTiming = {
+            submitStartedAt,
+            submitFailedAt,
+            submitStartedPerfMs,
+            submitFailedPerfMs,
+            submitRoundTripMs: submitFailedPerfMs - submitStartedPerfMs,
+        };
+        throw err;
+    }
 }
 
 /**
