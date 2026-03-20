@@ -71,6 +71,36 @@ const config = {
                   .split(',').map((s) => s.trim().toLowerCase()).filter(Boolean),
   sniperPrice:  parseFloat(process.env.SNIPER_PRICE  || '0.01'), // $ per share
   sniperShares: parseFloat(process.env.SNIPER_SHARES || '5'),    // shares per side
+
+  // ── Directional Sniper (15m BTC) ────────────────────────────────
+  directionalAsset:         (process.env.DIRECTIONAL_ASSET || 'btc').toLowerCase(),
+  directionalSignalMinutes: parseInt(process.env.DIRECTIONAL_SIGNAL_MINUTES || '3', 10),
+  directionalSignal:        process.env.DIRECTIONAL_SIGNAL || 'composite',
+  directionalEntryPrice:    parseFloat(process.env.DIRECTIONAL_ENTRY_PRICE || '0.55'),
+  directionalShares:        parseFloat(process.env.DIRECTIONAL_SHARES || '10'),
+  directionalMinConfidence: parseFloat(process.env.DIRECTIONAL_MIN_CONFIDENCE || '0'),
+  // Comma-separated UTC hours to skip (e.g. "0,3,8,12,14,15,19,22")
+  // Derived from outcome analytics — hours with negative PnL in backtest
+  directionalBlockedHours: (process.env.DIRECTIONAL_BLOCKED_HOURS || '0,3,8,12,14,15,19,22')
+                             .split(',').map(h => parseInt(h.trim(), 10)).filter(h => !isNaN(h)),
+
+  // ── Tail Sweep (5-min late-entry) ──────────────────────────────
+  tailSweepAssets: (process.env.TAIL_SWEEP_ASSETS || 'btc,eth,sol')
+                     .split(',').map((s) => s.trim().toLowerCase()).filter(Boolean),
+  tailSweepThreshold:     parseFloat(process.env.TAIL_SWEEP_THRESHOLD      || '0.90'),
+  tailSweepShares:        parseFloat(process.env.TAIL_SWEEP_SHARES         || '10'),
+  tailSweepSecondsBefore: parseInt(  process.env.TAIL_SWEEP_SECONDS_BEFORE || '20', 10),
+  tailSweepMinLiquidity:  parseFloat(process.env.TAIL_SWEEP_MIN_LIQUIDITY  || '5'),
+
+  // ── Favorite Bias (RN1-style) ───────────────────────────────────
+  // Buy the favorite side when price is in [priceMin, priceMax]. No Pinnacle (minimal).
+  favoritePriceMin:     parseFloat(process.env.FAVORITE_PRICE_MIN || '0.50'),
+  favoritePriceMax:     parseFloat(process.env.FAVORITE_PRICE_MAX || '0.85'),
+  favoriteOrderSize:    parseFloat(process.env.FAVORITE_ORDER_SIZE || '5'),   // USDC per order
+  favoritePollInterval: parseInt(process.env.FAVORITE_POLL_INTERVAL || '60', 10) * 1000, // ms
+  // Comma-separated keywords; event title or tag slug must match one (case-insensitive)
+  favoriteKeywords: (process.env.FAVORITE_KEYWORDS || 'football,soccer,EPL,Serie A,La Liga,Ligue 1,win')
+                      .split(',').map((s) => s.trim().toLowerCase()).filter(Boolean),
 };
 
 // Validation for copy-trade bot
@@ -98,6 +128,57 @@ export function validateMMConfig() {
   if (config.mmTradeSize <= 0) throw new Error('MM_TRADE_SIZE must be > 0');
   if (config.mmSellPrice <= 0 || config.mmSellPrice >= 1)
     throw new Error('MM_SELL_PRICE must be between 0 and 1');
+}
+
+// Validation for favorite-bias bot
+export function validateFavoriteConfig() {
+  const required = ['privateKey', 'proxyWallet'];
+  const missing = required.filter((key) => !config[key]);
+  if (missing.length > 0) {
+    throw new Error(`Missing required config: ${missing.join(', ')}. Check your .env file.`);
+  }
+  if (config.favoritePriceMin < 0 || config.favoritePriceMin >= 1)
+    throw new Error('FAVORITE_PRICE_MIN must be in [0, 1)');
+  if (config.favoritePriceMax <= 0 || config.favoritePriceMax > 1)
+    throw new Error('FAVORITE_PRICE_MAX must be in (0, 1]');
+  if (config.favoritePriceMin >= config.favoritePriceMax)
+    throw new Error('FAVORITE_PRICE_MIN must be < FAVORITE_PRICE_MAX');
+  if (config.favoriteOrderSize <= 0)
+    throw new Error('FAVORITE_ORDER_SIZE must be > 0');
+  if (config.favoriteKeywords.length === 0)
+    throw new Error('FAVORITE_KEYWORDS must have at least one keyword.');
+}
+
+// Validation for directional sniper bot
+export function validateDirectionalConfig() {
+  const required = ['privateKey', 'proxyWallet'];
+  const missing = required.filter((key) => !config[key]);
+  if (missing.length > 0) {
+    throw new Error(`Missing required config: ${missing.join(', ')}. Check your .env file.`);
+  }
+  if (config.directionalEntryPrice <= 0 || config.directionalEntryPrice >= 1)
+    throw new Error('DIRECTIONAL_ENTRY_PRICE must be between 0 and 1');
+  if (config.directionalShares <= 0)
+    throw new Error('DIRECTIONAL_SHARES must be > 0');
+  if (config.directionalSignalMinutes < 1 || config.directionalSignalMinutes > 14)
+    throw new Error('DIRECTIONAL_SIGNAL_MINUTES must be between 1 and 14');
+}
+
+// Validation for tail-sweep bot
+export function validateTailSweepConfig() {
+  const required = ['privateKey', 'proxyWallet'];
+  const missing = required.filter((key) => !config[key]);
+  if (missing.length > 0) {
+    throw new Error(`Missing required config: ${missing.join(', ')}. Check your .env file.`);
+  }
+  if (config.tailSweepThreshold <= 0 || config.tailSweepThreshold >= 1)
+    throw new Error('TAIL_SWEEP_THRESHOLD must be between 0 and 1');
+  if (config.tailSweepShares <= 0)
+    throw new Error('TAIL_SWEEP_SHARES must be > 0');
+  if (config.tailSweepSecondsBefore < 5 || config.tailSweepSecondsBefore > 60)
+    throw new Error('TAIL_SWEEP_SECONDS_BEFORE must be between 5 and 60');
+  if (config.tailSweepAssets.length === 0)
+    throw new Error('TAIL_SWEEP_ASSETS must have at least one asset');
 }
 
 export default config;
