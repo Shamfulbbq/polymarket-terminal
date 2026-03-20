@@ -92,6 +92,8 @@ const config = {
   tailSweepSecondsBefore: parseInt(  process.env.TAIL_SWEEP_SECONDS_BEFORE || '20', 10),
   tailSweepMinLiquidity:  parseFloat(process.env.TAIL_SWEEP_MIN_LIQUIDITY  || '5'),
   tailSweepMaxPrice:      parseFloat(process.env.TAIL_SWEEP_MAX_PRICE      || '0.97'), // skip if ask > this
+  tailSweepPrivateKey:    process.env.TAILSWEEP_PRIVATE_KEY    || process.env.PRIVATE_KEY,
+  tailSweepProxyWallet:   process.env.TAILSWEEP_PROXY_WALLET_ADDRESS || process.env.PROXY_WALLET_ADDRESS,
 
   // ── Favorite Bias (RN1-style) ───────────────────────────────────
   // Buy the favorite side when price is in [priceMin, priceMax]. No Pinnacle (minimal).
