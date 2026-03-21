@@ -28,7 +28,7 @@ let _lastTripTs = null;
 const STALE_WARN_COUNT = 2;
 const STALE_REJECT_COUNT = 3;
 const ANOMALY_WINDOW_MS = 5 * 60 * 1000;   // 5 minutes
-const ANOMALY_THRESHOLD = 5;                // 5 anomalies in window → trip
+const ANOMALY_THRESHOLD = 10;               // 10 anomalies in window → trip
 const CIRCUIT_HALT_MS = 2 * 60 * 1000;     // 2-minute cooldown
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -81,8 +81,8 @@ export function validateOrderbook(tokenId, book) {
         recordAnomaly('spread_zero', tokenId);
         return null;
     }
-    if (spread > 0.50) {
-        logger.warn(`GUARD: spread=${spread.toFixed(4)} > 0.50 for ${tokenId.slice(-8)} — rejecting`);
+    if (spread > 0.90) {
+        logger.warn(`GUARD: spread=${spread.toFixed(4)} > 0.90 for ${tokenId.slice(-8)} — rejecting`);
         recordAnomaly('spread_too_wide', tokenId);
         return null;
     }
