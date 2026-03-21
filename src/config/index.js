@@ -1,6 +1,22 @@
 import dotenv from 'dotenv';
 dotenv.config();
 
+// Build per-asset tailsweep overrides from env: TAIL_SWEEP_BTC_THRESHOLD, TAIL_SWEEP_ETH_MAX_PRICE, etc.
+function buildAssetOverrides() {
+  const overrides = {};
+  const assets = (process.env.TAIL_SWEEP_ASSETS || 'btc,eth,sol').split(',').map(s => s.trim().toLowerCase());
+  for (const asset of assets) {
+    const prefix = `TAIL_SWEEP_${asset.toUpperCase()}_`;
+    const o = {};
+    if (process.env[prefix + 'THRESHOLD'])  o.threshold = parseFloat(process.env[prefix + 'THRESHOLD']);
+    if (process.env[prefix + 'MAX_PRICE'])  o.maxPrice  = parseFloat(process.env[prefix + 'MAX_PRICE']);
+    if (process.env[prefix + 'SHARES'])     o.shares    = parseFloat(process.env[prefix + 'SHARES']);
+    if (process.env[prefix + 'MIN_BID_LIQ']) o.minBidLiq = parseFloat(process.env[prefix + 'MIN_BID_LIQ']);
+    if (Object.keys(o).length > 0) overrides[asset] = o;
+  }
+  return overrides;
+}
+
 const config = {
   // Wallet
   privateKey: process.env.PRIVATE_KEY,         // EOA private key (for signing only)
@@ -92,6 +108,16 @@ const config = {
   tailSweepSecondsBefore: parseInt(  process.env.TAIL_SWEEP_SECONDS_BEFORE || '20', 10),
   tailSweepMinLiquidity:  parseFloat(process.env.TAIL_SWEEP_MIN_LIQUIDITY  || '5'),
   tailSweepMaxPrice:      parseFloat(process.env.TAIL_SWEEP_MAX_PRICE      || '0.97'), // skip if ask > this
+  tailSweepMinBidLiq:     parseFloat(process.env.TAIL_SWEEP_MIN_BID_LIQ   || '0'),   // min bid-side liquidity (0=disabled)
+  tailSweepBlockedHours:  (process.env.TAIL_SWEEP_BLOCKED_HOURS || '')
+                            .split(',').map(h => parseInt(h.trim(), 10)).filter(h => !isNaN(h)),
+  tailSweepMaxShares:     parseFloat(process.env.TAIL_SWEEP_MAX_SHARES     || '20'),  // hard cap for Kelly
+  tailSweepKellyEnabled:  process.env.TAIL_SWEEP_KELLY === 'true',
+  tailSweepKellyMinTrades: parseInt(process.env.TAIL_SWEEP_KELLY_MIN_TRADES || '30', 10),
+  tailSweep15m:           process.env.TAIL_SWEEP_15M === 'true',
+  tailSweep15mSecsBefore: parseInt(process.env.TAIL_SWEEP_15M_SECS_BEFORE || '30', 10),
+  // Per-asset overrides: TAIL_SWEEP_BTC_THRESHOLD, TAIL_SWEEP_BTC_MAX_PRICE, etc.
+  tailSweepAssetOverrides: buildAssetOverrides(),
   tailSweepPrivateKey:    process.env.TAILSWEEP_PRIVATE_KEY    || process.env.PRIVATE_KEY,
   tailSweepProxyWallet:   process.env.TAILSWEEP_PROXY_WALLET_ADDRESS || process.env.PROXY_WALLET_ADDRESS,
 

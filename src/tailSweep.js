@@ -18,7 +18,8 @@ import { initClient, initClientWithKeys } from './services/client.js';
 import { getUsdcBalance } from './services/client.js';
 import { initDashboard, appendLog, updateStatus, isDashboardActive } from './ui/dashboard.js';
 import { startSniperDetector, stopSniperDetector } from './services/sniperDetector.js';
-import { scheduleTailSweep, getTrades, getPendingCount, getPaperStats, cancelAllPending } from './services/tailSweepExecutor.js';
+import { start15mDetector, stop15mDetector } from './services/fifteenMinDetector.js';
+import { scheduleTailSweep, getTrades, getPendingCount, getPaperStats, cancelAllPending, getLiveStats } from './services/tailSweepExecutor.js';
 import { redeemMMPositions } from './services/ctf.js';
 import { initBalanceLedger, logBalance, getBalancePnl } from './utils/balanceLedger.js';
 
@@ -187,6 +188,7 @@ async function handleNewMarket(market) {
 async function shutdown() {
     logger.warn('TAILSWEEP: shutting down...');
     stopSniperDetector();
+    stop15mDetector();
     cancelAllPending();
     if (refreshTimer) clearInterval(refreshTimer);
     if (redeemTimer) clearInterval(redeemTimer);
@@ -218,3 +220,9 @@ startBalanceSnapshots();
 const origAssets = config.sniperAssets;
 config.sniperAssets = [...new Set([...origAssets, ...config.tailSweepAssets])];
 startSniperDetector(handleNewMarket);
+
+// 15-minute markets (optional)
+if (config.tailSweep15m) {
+    start15mDetector(handleNewMarket);
+    logger.info('TAILSWEEP: 15-minute market detection enabled');
+}

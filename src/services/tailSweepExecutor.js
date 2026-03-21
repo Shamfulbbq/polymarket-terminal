@@ -11,6 +11,8 @@
 import { Side, OrderType } from '@polymarket/clob-client';
 import config from '../config/index.js';
 import { submitOrderTimed, getUsdcBalance } from './client.js';
+import { checkResolutionOnChain } from './ctf.js';
+import { kellyShares } from '../utils/kelly.js';
 import logger from '../utils/logger.js';
 import { logBalance } from '../utils/balanceLedger.js';
 import fs from 'fs';
@@ -35,9 +37,29 @@ function computeFeeShares(shares, price) {
     return shares * 0.25 * Math.pow(price * (1 - price), 2);
 }
 
-const SLOT_SEC = 5 * 60;
+const SLOT_5M  = 5  * 60;
+const SLOT_15M = 15 * 60;
 const pendingTimers = new Map();
 const trades = [];
+
+// ── Rolling stats per asset (for Kelly sizing) ──────────────────────────────
+const rollingStats = {}; // { btc: { wins: 0, total: 0 }, eth: { ... } }
+
+function getStats(asset) {
+    const key = asset.toLowerCase();
+    if (!rollingStats[key]) rollingStats[key] = { wins: 0, total: 0 };
+    return rollingStats[key];
+}
+
+export function getLiveStats() { return { ...rollingStats }; }
+
+// ── Asset-specific config lookup ─────────────────────────────────────────────
+function assetConfig(asset, key, fallback) {
+    const overrides = config.tailSweepAssetOverrides || {};
+    const o = overrides[asset.toLowerCase()];
+    if (o && o[key] !== undefined) return o[key];
+    return fallback;
+}
 const paperThresholds = [0.85, 0.88, 0.90, 0.92, 0.95];
 const paperSizes = [5, 10];
 const paperStats = {};
@@ -79,11 +101,22 @@ async function fetchOrderbook(tokenId) {
  * Schedules an orderbook check N seconds before the market closes.
  */
 export function scheduleTailSweep(market) {
+    const slotDuration = market.slotDuration || SLOT_5M;
     const slotEnd = market.endTime
         ? new Date(market.endTime).getTime()
-        : (market.slotTimestamp + SLOT_SEC) * 1000;
+        : (market.slotTimestamp + slotDuration) * 1000;
 
-    const checkAtMs = slotEnd - config.tailSweepSecondsBefore * 1000;
+    // Time-of-day filter
+    if (config.tailSweepBlockedHours.length > 0) {
+        const hourUtc = new Date().getUTCHours();
+        if (config.tailSweepBlockedHours.includes(hourUtc)) {
+            logger.info(`TAILSWEEP: skipping ${market.asset.toUpperCase()} — UTC hour ${hourUtc} is blocked`);
+            return;
+        }
+    }
+
+    const secsBefore = slotDuration === SLOT_15M ? config.tailSweep15mSecsBefore : config.tailSweepSecondsBefore;
+    const checkAtMs = slotEnd - secsBefore * 1000;
     const delayMs = Math.max(0, checkAtMs - Date.now());
     const key = `${market.asset}-${market.slotTimestamp}`;
 
@@ -149,29 +182,67 @@ async function executeSweep(market, slotEndMs) {
         return;
     }
 
-    // Live mode: check threshold
-    if (dominantBid < config.tailSweepThreshold) {
-        logger.info(`TAILSWEEP: ${label} — ${dominantSide} bid $${dominantBid.toFixed(2)} below threshold $${config.tailSweepThreshold} — skipping`);
+    // Live mode: asset-specific config
+    const threshold   = assetConfig(asset, 'threshold', config.tailSweepThreshold);
+    const maxPrice    = assetConfig(asset, 'maxPrice',  config.tailSweepMaxPrice);
+    const minBidLiq   = assetConfig(asset, 'minBidLiq', config.tailSweepMinBidLiq);
+
+    // Check threshold
+    if (dominantBid < threshold) {
+        logger.info(`TAILSWEEP: ${label} — ${dominantSide} bid $${dominantBid.toFixed(2)} below threshold $${threshold} — skipping`);
         logOrder(market, dominantSide, dominantBid, dominantAsk, dominantLiq, 'skipped', 'below_threshold');
         return;
     }
 
+    // Ask-side liquidity check
     if (dominantLiq < config.tailSweepMinLiquidity) {
         logger.warn(`TAILSWEEP: ${label} — ${dominantSide} ask liquidity ${dominantLiq.toFixed(0)} < ${config.tailSweepMinLiquidity} min — skipping`);
         logOrder(market, dominantSide, dominantBid, dominantAsk, dominantLiq, 'skipped', 'low_liquidity');
         return;
     }
 
-    // Entry price ceiling — skip if ask is above the profitable zone
-    if (config.tailSweepMaxPrice > 0 && dominantAsk > config.tailSweepMaxPrice) {
-        logger.info(`TAILSWEEP: ${label} — ${dominantSide} ask $${dominantAsk.toFixed(2)} above max $${config.tailSweepMaxPrice} — skipping`);
+    // Bid-side depth filter
+    const dominantBidLiq = dominantSide === 'UP' ? bookUp.bidLiquidity : bookDown.bidLiquidity;
+    if (minBidLiq > 0 && dominantBidLiq < minBidLiq) {
+        logger.info(`TAILSWEEP: ${label} — ${dominantSide} bid liq ${dominantBidLiq.toFixed(0)} < ${minBidLiq} min — skipping`);
+        logOrder(market, dominantSide, dominantBid, dominantAsk, dominantLiq, 'skipped', 'low_bid_liquidity');
+        return;
+    }
+
+    // Entry price ceiling
+    if (maxPrice > 0 && dominantAsk > maxPrice) {
+        logger.info(`TAILSWEEP: ${label} — ${dominantSide} ask $${dominantAsk.toFixed(2)} above max $${maxPrice} — skipping`);
         logOrder(market, dominantSide, dominantBid, dominantAsk, dominantLiq, 'skipped', 'above_price_ceiling');
         return;
     }
 
-    // Buy at best ask price for immediate fill
+    // Position sizing: Kelly or flat
     const entryPrice = dominantAsk;
-    const shares = config.tailSweepShares;
+    const stats = getStats(asset);
+    let shares;
+    if (config.tailSweepKellyEnabled && stats.total >= config.tailSweepKellyMinTrades) {
+        let balance = config.tailSweepShares * entryPrice; // fallback
+        try { balance = await getUsdcBalance(); } catch { /* use fallback */ }
+        shares = kellyShares({
+            winRate:     stats.total > 0 ? stats.wins / stats.total : 0,
+            entryPrice,
+            balance,
+            minShares:   1,
+            maxShares:   config.tailSweepMaxShares,
+            totalTrades: stats.total,
+            minTrades:   config.tailSweepKellyMinTrades,
+        });
+        logger.info(`TAILSWEEP: Kelly → ${shares}sh (wr=${(stats.wins/stats.total*100).toFixed(0)}% n=${stats.total} bal=$${balance.toFixed(0)})`);
+    } else {
+        shares = assetConfig(asset, 'shares', config.tailSweepShares);
+    }
+
+    if (shares <= 0) {
+        logger.info(`TAILSWEEP: ${label} — Kelly says 0 shares (no edge) — skipping`);
+        logOrder(market, dominantSide, dominantBid, dominantAsk, dominantLiq, 'skipped', 'kelly_no_edge');
+        return;
+    }
+
     const cost = entryPrice * shares;
     const fee = computeFeeShares(shares, entryPrice);
     const netPayout = (shares - fee) * 1.0;
@@ -206,6 +277,8 @@ async function executeSweep(market, slotEndMs) {
             });
             logOrder(market, dominantSide, dominantBid, dominantAsk, dominantLiq, 'placed', null, res.orderID, entryPrice);
             logBalance('tailsweep_order', { side: dominantSide, orderId: res.orderID, cost }).catch(() => {});
+            // Auto outcome tracking
+            scheduleOutcomeCheck(market, dominantSide, entryPrice, shares, cost, fee);
         } else {
             const errMsg = res?.errorMsg || res?.message || 'unknown';
             logger.warn(`TAILSWEEP: order failed — ${errMsg}`);
@@ -216,6 +289,67 @@ async function executeSweep(market, slotEndMs) {
         logOrder(market, dominantSide, dominantBid, dominantAsk, dominantLiq, 'error', err.message);
     }
 }
+
+// ── Auto outcome tracking (live trades) ──────────────────────────────────────
+
+function scheduleOutcomeCheck(market, side, entryPrice, shares, cost, feeShares) {
+    const slotDuration = market.slotDuration || SLOT_5M;
+    const slotEnd = market.endTime
+        ? new Date(market.endTime).getTime()
+        : (market.slotTimestamp + slotDuration) * 1000;
+    const waitMs = Math.max(0, slotEnd - Date.now()) + 3 * 60_000; // wait until close + 3 min
+
+    setTimeout(async () => {
+        const label = `${market.asset.toUpperCase()} ${(market.question || '').slice(0, 30)}`;
+        let outcome = null;
+
+        // Try on-chain first (works from Ireland server), fall back to Gamma
+        for (let attempt = 1; attempt <= 6; attempt++) {
+            outcome = await checkResolutionOnChain(market.conditionId);
+            if (!outcome) outcome = await checkOutcome(market);
+            if (outcome) break;
+            if (attempt < 6) await new Promise(r => setTimeout(r, 60_000));
+        }
+
+        if (!outcome) {
+            logger.warn(`TAILSWEEP: outcome unknown for ${label} after 6 attempts`);
+            return;
+        }
+
+        const won = outcome === side;
+        const netPayout = won ? (shares - feeShares) : 0;
+        const pnl = netPayout - cost;
+        const stats = getStats(market.asset);
+        stats.total++;
+        if (won) stats.wins++;
+
+        const wr = stats.total > 0 ? (stats.wins / stats.total * 100).toFixed(1) : '?';
+        const pnlStr = pnl >= 0 ? `+$${pnl.toFixed(2)}` : `-$${Math.abs(pnl).toFixed(2)}`;
+        const emoji = won ? 'WIN' : 'LOSS';
+        logger.money(`TAILSWEEP: ${emoji} ${label} — ${side} @ $${entryPrice.toFixed(2)} × ${shares}sh → ${pnlStr} | ${market.asset.toUpperCase()} wr=${wr}% (${stats.wins}/${stats.total})`);
+
+        // Update the last log entry with outcome
+        appendOrder({
+            ts: new Date().toISOString(),
+            asset: (market.asset || '').toUpperCase(),
+            conditionId: market.conditionId,
+            slotTimestamp: market.slotTimestamp,
+            status: 'outcome',
+            side, outcome, won, entryPrice, shares, cost,
+            pnl: Math.round(pnl * 100) / 100,
+            rollingWinRate: stats.total > 0 ? Math.round(stats.wins / stats.total * 1000) / 1000 : null,
+            rollingTrades: stats.total,
+        });
+    }, waitMs);
+
+    logger.info(`TAILSWEEP: outcome check scheduled in ${Math.round(waitMs / 1000)}s for ${market.asset.toUpperCase()}`);
+}
+
+// ── Live session stats (for dashboard) ───────────────────────────────────────
+
+let sessionPnl = 0;
+let sessionTrades = 0;
+export function getSessionPnl() { return { pnl: sessionPnl, trades: sessionTrades }; }
 
 async function paperTrade(market, dominantSide, dominantBid, dominantAsk, dominantLiq, slotEndMs) {
     const label = `${market.asset.toUpperCase()} ${(market.question || '').slice(0, 30)}`;

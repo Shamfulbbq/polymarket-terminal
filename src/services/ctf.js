@@ -12,6 +12,8 @@ import { ethers } from 'ethers';
 import config from '../config/index.js';
 import { getSigner, getPolygonProvider } from './client.js';
 import logger from '../utils/logger.js';
+import { logRedeem } from '../utils/sniperLogger.js';
+import { logBalance } from '../utils/balanceLedger.js';
 
 // ── Contract addresses (Polygon mainnet) ──────────────────────────────────────
 
@@ -409,14 +411,66 @@ export async function cleanupOpenPositions(clobClient) {
     }
 }
 
+// ── On-chain resolution check ─────────────────────────────────────────────────
+
+/**
+ * Check if a market has resolved on-chain via CTF payoutNumerators.
+ * Returns 'UP' | 'DOWN' | null (not yet resolved).
+ */
+export async function checkResolutionOnChain(conditionId) {
+    try {
+        const provider = await getPolygonProvider();
+        const ctf = new ethers.Contract(CTF_ADDRESS, CTF_ABI, provider);
+        const denominator = await ctf.payoutDenominator(conditionId);
+        if (denominator.isZero()) return null; // not resolved
+
+        const [n0, n1] = await Promise.all([
+            ctf.payoutNumerators(conditionId, 0),
+            ctf.payoutNumerators(conditionId, 1),
+        ]);
+        const p0 = n0.toNumber() / denominator.toNumber();
+        const p1 = n1.toNumber() / denominator.toNumber();
+        if (p0 > 0.9) return 'UP';
+        if (p1 > 0.9) return 'DOWN';
+        return null;
+    } catch {
+        return null;
+    }
+}
+
 // ── Periodic redeemer ─────────────────────────────────────────────────────────
+
+const MIN_REDEEM_USDC = 0.01; // skip redeem when expected payout is below this (avoid gas for $0)
+
+/**
+ * Resolve outcome index (0 = YES, 1 = NO) for a token from Gamma market.
+ * Used when Data API position doesn't include outcomeIndex.
+ */
+async function getOutcomeIndexForToken(conditionId, tokenId) {
+    try {
+        const resp = await fetch(`${config.gammaHost}/markets?condition_id=${conditionId}`);
+        if (!resp.ok) return null;
+        const markets = await resp.json();
+        if (!Array.isArray(markets) || markets.length === 0) return null;
+        const market = markets[0];
+        let tokenIds = market.clobTokenIds ?? market.clob_token_ids;
+        if (typeof tokenIds === 'string') {
+            try { tokenIds = JSON.parse(tokenIds); } catch { return null; }
+        }
+        if (!Array.isArray(tokenIds) || tokenIds.length < 2) return null;
+        const idx = tokenIds.findIndex((id) => String(id) === String(tokenId));
+        return idx >= 0 ? idx : null;
+    } catch {
+        return null;
+    }
+}
 
 /**
  * Check all positions held by the proxy wallet, find resolved markets,
  * and call redeemPositions via the Safe to collect USDC.
  *
- * Covers recovery buy positions, residual tokens from splits, and anything
- * else that resolved without being sold through the CLOB.
+ * Uses per-token outcome index so expectedUsdc is correct (no token-order bug).
+ * Skips redeem when expected payout < MIN_REDEEM_USDC to avoid gas on $0.
  *
  * Called automatically every redeemInterval seconds from mm.js.
  */
@@ -437,16 +491,25 @@ export async function redeemMMPositions() {
     const ctf = new ethers.Contract(CTF_ADDRESS, CTF_ABI, provider);
     const ctfIface = new ethers.utils.Interface(CTF_ABI);
 
-    // Group tokens by conditionId
+    // Group tokens by conditionId; capture outcomeIndex per token (0 = YES, 1 = NO)
     const byCondition = new Map();
     for (const pos of dataPositions) {
         const cid = pos.conditionId || pos.condition_id;
         const tid = pos.asset        || pos.tokenId     || pos.token_id;
         if (!cid || !tid) continue;
+        let outcomeIndex = null;
+        if (typeof pos.outcomeIndex === 'number' && (pos.outcomeIndex === 0 || pos.outcomeIndex === 1)) {
+            outcomeIndex = pos.outcomeIndex;
+        } else {
+            const out = String(pos.outcome || '').toUpperCase();
+            if (out === 'YES') outcomeIndex = 0;
+            else if (out === 'NO') outcomeIndex = 1;
+        }
         if (!byCondition.has(cid)) byCondition.set(cid, []);
         byCondition.get(cid).push({
             tokenId: String(tid),
             size:    parseFloat(pos.size || pos.currentValue || '0'),
+            outcomeIndex,
         });
     }
 
@@ -468,21 +531,38 @@ export async function redeemMMPositions() {
             const totalShares = balances.reduce((a, b) => a + b, 0);
             if (totalShares < 0.001) continue; // nothing on-chain to redeem
 
-            // Estimate payout from numerators (for logging only)
+            // Resolve outcome index for any token missing it (token order != outcome index)
             const payoutFractions = await Promise.all(
                 [0, 1].map((i) =>
                     ctf.payoutNumerators(conditionId, i)
                         .then((n) => n.toNumber() / denominator.toNumber())
                 )
             );
-            const expectedUsdc = balances.reduce(
-                (sum, shares, i) => sum + shares * (payoutFractions[i] ?? 0), 0
-            );
+            for (let i = 0; i < tokens.length; i++) {
+                if (tokens[i].outcomeIndex == null) {
+                    tokens[i].outcomeIndex = await getOutcomeIndexForToken(conditionId, tokens[i].tokenId);
+                }
+            }
+
+            // Expected USDC using correct token -> outcome index mapping
+            let expectedUsdc = 0;
+            for (let i = 0; i < tokens.length; i++) {
+                const idx = tokens[i].outcomeIndex;
+                if (idx === 0 || idx === 1) {
+                    expectedUsdc += (balances[i] || 0) * (payoutFractions[idx] ?? 0);
+                }
+            }
 
             const label = conditionId.slice(0, 12) + '...';
 
             if (config.dryRun) {
                 logger.money(`MM[SIM] redeem: ${label} — ${totalShares.toFixed(3)} shares → ~$${expectedUsdc.toFixed(2)} USDC`);
+                continue;
+            }
+
+            // Skip redeem when payout is effectively $0 — avoid burning gas
+            if (expectedUsdc < MIN_REDEEM_USDC) {
+                logger.info(`MM redeemer: ${label} skipping — ~$${expectedUsdc.toFixed(2)} USDC (below $${MIN_REDEEM_USDC})`);
                 continue;
             }
 
@@ -498,8 +578,12 @@ export async function redeemMMPositions() {
             await execSafeCall(CTF_ADDRESS, data, `redeemPositions ${label}`);
             logger.money(`MM redeemer: redeemed ${label} → ~$${expectedUsdc.toFixed(2)} USDC`);
             redeemed++;
+            const winningOutcome = (payoutFractions[0] || 0) >= 0.99 ? 'YES' : 'NO';
+            logRedeem({ conditionId, winningOutcome, usdcReturned: expectedUsdc });
+            logBalance('redeem_success', { conditionId, expectedUsdc }).catch(() => {});
         } catch (err) {
             logger.error(`MM redeemer: failed to redeem ${conditionId.slice(0, 12)}... — ${parseOnchainError(err)}`);
+            logBalance('redeem_failed', { conditionId, error: parseOnchainError(err) }).catch(() => {});
         }
     }
 

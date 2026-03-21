@@ -23,7 +23,8 @@
     "tailsweep": "DRY_RUN=false node src/tailSweep.js",
     "tailsweep-sim": "DRY_RUN=true node src/tailSweep.js",
     "lp": "node src/lp.js",
-    "lp:paper": "LP_PAPER=true node src/lp_paper.js"
+    "lp:paper": "LP_PAPER=true node src/lp_paper.js",
+    "test": "node test/kelly.test.js"
   },
   "keywords": [
     "polymarket",
