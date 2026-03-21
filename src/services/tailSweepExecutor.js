@@ -184,6 +184,7 @@ async function executeSweep(market, slotEndMs) {
 
     // Live mode: asset-specific config
     const threshold   = assetConfig(asset, 'threshold', config.tailSweepThreshold);
+    const minPrice    = assetConfig(asset, 'minPrice',  config.tailSweepMinPrice);
     const maxPrice    = assetConfig(asset, 'maxPrice',  config.tailSweepMaxPrice);
     const minBidLiq   = assetConfig(asset, 'minBidLiq', config.tailSweepMinBidLiq);
 
@@ -209,7 +210,12 @@ async function executeSweep(market, slotEndMs) {
         return;
     }
 
-    // Entry price ceiling
+    // Entry price band — only trade in the sweet spot
+    if (minPrice > 0 && dominantAsk < minPrice) {
+        logger.info(`TAILSWEEP: ${label} — ${dominantSide} ask $${dominantAsk.toFixed(2)} below min $${minPrice} — skipping`);
+        logOrder(market, dominantSide, dominantBid, dominantAsk, dominantLiq, 'skipped', 'below_price_floor');
+        return;
+    }
     if (maxPrice > 0 && dominantAsk > maxPrice) {
         logger.info(`TAILSWEEP: ${label} — ${dominantSide} ask $${dominantAsk.toFixed(2)} above max $${maxPrice} — skipping`);
         logOrder(market, dominantSide, dominantBid, dominantAsk, dominantLiq, 'skipped', 'above_price_ceiling');

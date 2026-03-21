@@ -9,6 +9,7 @@ function buildAssetOverrides() {
     const prefix = `TAIL_SWEEP_${asset.toUpperCase()}_`;
     const o = {};
     if (process.env[prefix + 'THRESHOLD'])  o.threshold = parseFloat(process.env[prefix + 'THRESHOLD']);
+    if (process.env[prefix + 'MIN_PRICE'])  o.minPrice  = parseFloat(process.env[prefix + 'MIN_PRICE']);
     if (process.env[prefix + 'MAX_PRICE'])  o.maxPrice  = parseFloat(process.env[prefix + 'MAX_PRICE']);
     if (process.env[prefix + 'SHARES'])     o.shares    = parseFloat(process.env[prefix + 'SHARES']);
     if (process.env[prefix + 'MIN_BID_LIQ']) o.minBidLiq = parseFloat(process.env[prefix + 'MIN_BID_LIQ']);
@@ -107,6 +108,7 @@ const config = {
   tailSweepShares:        parseFloat(process.env.TAIL_SWEEP_SHARES         || '10'),
   tailSweepSecondsBefore: parseInt(  process.env.TAIL_SWEEP_SECONDS_BEFORE || '20', 10),
   tailSweepMinLiquidity:  parseFloat(process.env.TAIL_SWEEP_MIN_LIQUIDITY  || '5'),
+  tailSweepMinPrice:      parseFloat(process.env.TAIL_SWEEP_MIN_PRICE      || '0.95'), // skip if ask < this
   tailSweepMaxPrice:      parseFloat(process.env.TAIL_SWEEP_MAX_PRICE      || '0.97'), // skip if ask > this
   tailSweepMinBidLiq:     parseFloat(process.env.TAIL_SWEEP_MIN_BID_LIQ   || '0'),   // min bid-side liquidity (0=disabled)
   tailSweepBlockedHours:  (process.env.TAIL_SWEEP_BLOCKED_HOURS || '')
