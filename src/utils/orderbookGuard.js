@@ -25,8 +25,8 @@ let _lastTripTs = null;
 
 // ── Config ───────────────────────────────────────────────────────────────────
 
-const STALE_WARN_COUNT = 2;
-const STALE_REJECT_COUNT = 3;
+const STALE_WARN_COUNT = 5;
+const STALE_REJECT_COUNT = 10;  // 10 identical reads (~2.5 min at 15s polling)
 const ANOMALY_WINDOW_MS = 5 * 60 * 1000;   // 5 minutes
 const ANOMALY_THRESHOLD = 10;               // 10 anomalies in window → trip
 const CIRCUIT_HALT_MS = 2 * 60 * 1000;     // 2-minute cooldown
