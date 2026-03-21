@@ -129,14 +129,14 @@ export async function scanForTargets(opts = {}) {
         });
     }
 
-    // Pre-score by reward/competition, then enrich top 3x candidates with orderbook data
+    // Pre-score by reward/competition, then enrich candidates with orderbook data
     for (const c of candidates) {
         c.preScore = c.dailyReward / Math.sqrt(c.competitiveness + 1);
     }
     candidates.sort((a, b) => b.preScore - a.preScore);
 
-    // Enrich top candidates with negRisk, tickSize, and orderbook data
-    const enrichPool = candidates.slice(0, maxMarkets * 3); // fetch 3x to allow filtering
+    // Enrich ALL candidates (not just top N) — liquidity score can reorder dramatically
+    const enrichPool = candidates;
     const targets = [];
     for (const t of enrichPool) {
         if (targets.length >= maxMarkets) break;
