@@ -81,11 +81,7 @@ export function validateOrderbook(tokenId, book) {
         recordAnomaly('spread_zero', tokenId);
         return null;
     }
-    if (spread > 0.90) {
-        logger.warn(`GUARD: spread=${spread.toFixed(4)} > 0.90 for ${tokenId.slice(-8)} — rejecting`);
-        recordAnomaly('spread_too_wide', tokenId);
-        return null;
-    }
+    // Dangerous anomalies — count toward circuit breaker
     if (bestBid > bestAsk) {
         logger.warn(`GUARD: crossed book bid=${bestBid} > ask=${bestAsk} for ${tokenId.slice(-8)} — rejecting`);
         recordAnomaly('crossed_book', tokenId);
@@ -96,10 +92,13 @@ export function validateOrderbook(tokenId, book) {
         recordAnomaly('out_of_range', tokenId);
         return null;
     }
+    // Non-dangerous — reject but don't count toward circuit breaker
+    // (empty/wide books are normal on illiquid prediction markets)
     if (bestBid === 0 && bestAsk === 1) {
-        logger.warn(`GUARD: empty book (bid=0, ask=1) for ${tokenId.slice(-8)} — rejecting`);
-        recordAnomaly('empty_book', tokenId);
-        return null;
+        return null; // silent reject — empty book
+    }
+    if (spread > 0.90) {
+        return null; // silent reject — wide spread, not a feed failure
     }
 
     // ── Layer 2: Staleness detection ─────────────────────────────────────
