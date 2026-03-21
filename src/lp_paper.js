@@ -14,10 +14,11 @@ import { scanForTargets } from './services/rewardScanner.js';
 import { checkFills, cancelAllOrders, refreshAllQuotes, checkStalePositions, LP_CONFIG, getActiveQuotes, getPaperStatus } from './services/lpExecutor.js';
 
 // Override for paper mode:
-// - Budget: NO side on low-prob markets can cost $170+ (200sh × $0.86)
-// - Exposure cap: max $200 in positions total — leaves $300 buffer for hedges/recovery
-LP_CONFIG.maxOrderSizeUsd = 200;
-LP_CONFIG.maxExposureUsd = 200;
+// Target 20sh liquid markets — much cheaper orders ($2-18 per side)
+LP_CONFIG.minOrderShares = 20;        // match the 20sh market minimum
+LP_CONFIG.maxOrderSizeUsd = 50;       // plenty for 20sh orders
+LP_CONFIG.maxExposureUsd = 200;       // cap total across all 5 markets
+LP_CONFIG.maxPositionShares = 40;     // max 2 fills per side before pausing
 
 // Ensure paper mode is set
 if (process.env.LP_PAPER !== 'true') {
@@ -50,15 +51,26 @@ let targetMarkets = [];
 
 async function rescan() {
     try {
-        logger.info('LP PAPER: scanning for ALL reward-qualifying markets...');
-        // Cast wide net — any market paying rewards, ranked by reward × liquidity
+        logger.info('LP PAPER: scanning for liquid reward markets (20sh, $20k+ vol)...');
         targetMarkets = await scanForTargets({
-            minDailyReward: 1,        // any market paying $1+/day
-            maxOrderBudget: 200,
+            minDailyReward: 1,
+            maxOrderBudget: 50,       // prefer cheap 20sh markets (~$10/order), skip 200sh monsters
             priceMin: 0.05,
             priceMax: 0.95,
-            maxMarkets: 3,            // top 3 by liquidity-weighted score
+            minVolume: 20000,         // $20k+ daily volume — enough for exits to fill
+            maxMarkets: 5,
         });
+
+        if (targetMarkets.length === 0) {
+            logger.warn('LP PAPER: no $20k+ vol markets — falling back to all rewards...');
+            targetMarkets = await scanForTargets({
+                minDailyReward: 1,
+                maxOrderBudget: 200,
+                priceMin: 0.05,
+                priceMax: 0.95,
+                maxMarkets: 3,
+            });
+        }
 
         if (targetMarkets.length === 0) {
             logger.warn('LP PAPER: no suitable markets found');
