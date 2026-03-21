@@ -67,7 +67,7 @@ export function getPaperStatus() {
 const _activeQuotes = new Map(); // conditionId -> { yesBidId, yesAskId, noBidId, noAskId, market, postedAt }
 const _lastMidpoints = new Map(); // conditionId -> { mid, ts }
 const _processedFills = new Set(); // orderId:matchedSize — track already-processed fills
-const _fillTimestamps = new Map(); // conditionId -> firstFillTs (for auto-exit)
+const _fillTimestamps = new Map(); // conditionId -> { ts, market } (for auto-exit)
 
 const LP_MAX_HOLD_HOURS = parseFloat(process.env.LP_MAX_HOLD_HOURS || '4');
 
@@ -442,7 +442,10 @@ function simulatePaperFill(conditionId, orderId, order) {
     }
 
     _paper.totalFills++;
-    if (isBuy && !_fillTimestamps.has(conditionId)) _fillTimestamps.set(conditionId, Date.now());
+    if (isBuy && !_fillTimestamps.has(conditionId)) {
+        const q = _activeQuotes.get(conditionId);
+        if (q?.market) _fillTimestamps.set(conditionId, { ts: Date.now(), market: q.market });
+    }
     appendPaperLog({ ts: new Date().toISOString(), action: 'fill', conditionId, isYes, isBuy, price, shares, label, pnlRealized: _paper.pnlRealized });
     _paper.orders.delete(orderId);
 }
@@ -560,7 +563,7 @@ export async function checkFills() {
                     if (matched > 0 && !_processedFills.has(fillKey)) {
                         _processedFills.add(fillKey);
                         risk.recordFill(conditionId, side, matched, price);
-                        if (side.includes('BUY') && !_fillTimestamps.has(conditionId)) _fillTimestamps.set(conditionId, Date.now());
+                        if (side.includes('BUY') && !_fillTimestamps.has(conditionId)) _fillTimestamps.set(conditionId, { ts: Date.now(), market: quotes.market });
                         logger.info(`LP: FILL ${side} ${matched}sh @ $${price.toFixed(2)} — ${quotes.market.question?.slice(0, 30)}`);
                         appendLog({ ts: new Date().toISOString(), action: 'fill', conditionId, side, price, shares: matched, orderId: id });
 
@@ -599,12 +602,11 @@ export async function checkStalePositions() {
     const maxAgeMs = LP_MAX_HOLD_HOURS * 3600_000;
     const now = Date.now();
 
-    for (const [conditionId, firstFillTs] of _fillTimestamps) {
+    for (const [conditionId, fillData] of _fillTimestamps) {
+        const firstFillTs = fillData.ts || fillData; // backwards compat
         if (now - firstFillTs < maxAgeMs) continue;
 
-        const quotes = _activeQuotes.get(conditionId);
-        if (!quotes) continue;
-        const market = quotes.market;
+        const market = fillData.market || _activeQuotes.get(conditionId)?.market;
         if (!market) continue;
 
         // Get current position
