@@ -16,6 +16,7 @@ import { ALL_SIGNALS } from '../backtest/signals.js';
 import { submitOrderTimed } from './client.js';
 import logger from '../utils/logger.js';
 import { logBalance } from '../utils/balanceLedger.js';
+import { validateOrderbook, isCircuitBroken } from '../utils/orderbookGuard.js';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -128,6 +129,12 @@ async function evaluateAndTrade(market, openAtMs) {
     const { conditionId, question, yesTokenId, noTokenId, tickSize, negRisk, asset } = market;
     const label = question.slice(0, 40);
 
+    // Circuit breaker check
+    if (isCircuitBroken()) {
+        logger.warn(`DIRECTIONAL: circuit breaker active — skipping "${label}"`);
+        return;
+    }
+
     // Get candles from Binance since market open
     const candles = getCandlesSince(openAtMs);
 
@@ -169,7 +176,7 @@ async function evaluateAndTrade(market, openAtMs) {
     const sideName = direction === 'UP' ? 'UP (YES)' : 'DOWN (NO)';
 
     // Orderbook pre-check — fetch live best ask for the target token
-    const book = await fetchOrderbook(tokenId);
+    const book = validateOrderbook(tokenId, await fetchOrderbook(tokenId));
     const entryPrice = config.directionalEntryPrice;
     let effectivePrice = entryPrice;
 

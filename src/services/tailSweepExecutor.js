@@ -15,6 +15,7 @@ import { checkResolutionOnChain } from './ctf.js';
 import { kellyShares } from '../utils/kelly.js';
 import logger from '../utils/logger.js';
 import { logBalance } from '../utils/balanceLedger.js';
+import { validateOrderbook, isCircuitBroken } from '../utils/orderbookGuard.js';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -141,11 +142,20 @@ async function executeSweep(market, slotEndMs) {
     const { asset, conditionId, question, yesTokenId, noTokenId, tickSize, negRisk } = market;
     const label = `${asset.toUpperCase()} ${(question || '').slice(0, 35)}`;
 
+    // Circuit breaker check
+    if (isCircuitBroken()) {
+        logger.warn(`TAILSWEEP: ${label} — circuit breaker active, skipping`);
+        return;
+    }
+
     // Fetch orderbook for both sides simultaneously
-    const [bookUp, bookDown] = await Promise.all([
+    const [rawBookUp, rawBookDown] = await Promise.all([
         fetchOrderbook(yesTokenId),
         fetchOrderbook(noTokenId),
     ]);
+
+    const bookUp = validateOrderbook(yesTokenId, rawBookUp);
+    const bookDown = validateOrderbook(noTokenId, rawBookDown);
 
     if (!bookUp || !bookDown) {
         logger.warn(`TAILSWEEP: ${label} — orderbook unavailable, skipping`);

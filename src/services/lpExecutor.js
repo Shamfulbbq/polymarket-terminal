@@ -12,6 +12,7 @@ import config from '../config/index.js';
 import { getClient, submitOrderTimed } from './client.js';
 import logger from '../utils/logger.js';
 import * as risk from './riskManager.js';
+import { validateOrderbook, isCircuitBroken } from '../utils/orderbookGuard.js';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -224,6 +225,12 @@ async function placeOrder(market, tokenId, side, price, shares, label) {
 export async function postQuotes(market) {
     if (!PAPER_MODE && risk.isHalted()) return;
 
+    // Circuit breaker check
+    if (isCircuitBroken()) {
+        logger.warn(`LP: circuit breaker active — skipping ${market.question?.slice(0, 40)}`);
+        return;
+    }
+
     if (!PAPER_MODE) {
         const suitability = risk.isMarketSuitable(market);
         if (!suitability.ok) {
@@ -234,8 +241,8 @@ export async function postQuotes(market) {
 
     // Fetch real orderbooks (even in paper mode — we price against real book)
     const [yesBook, noBook] = await Promise.all([
-        fetchBook(market.yesTokenId),
-        fetchBook(market.noTokenId),
+        fetchBook(market.yesTokenId).then(b => validateOrderbook(market.yesTokenId, b)),
+        fetchBook(market.noTokenId).then(b => validateOrderbook(market.noTokenId, b)),
     ]);
 
     if (!yesBook?.midpoint || !noBook?.midpoint) {
