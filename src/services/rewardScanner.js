@@ -107,8 +107,10 @@ export async function scanForTargets(opts = {}) {
         // Filter: market must require at least minSize shares (0 = accept any)
         if (minSize > 0 && mktMinSize < minSize) continue;
 
-        // Filter: skip markets too expensive for our budget
-        if (mktMinSize * yesPrice > maxOrderBudget) continue;
+        // Filter: skip markets too expensive for our budget (check BOTH sides)
+        const noPrice = noToken.price || (1 - yesPrice);
+        const maxSideCost = Math.max(mktMinSize * yesPrice, mktMinSize * noPrice);
+        if (maxSideCost > maxOrderBudget) continue;
 
         candidates.push({
             conditionId: m.condition_id,
