@@ -50,27 +50,15 @@ let targetMarkets = [];
 
 async function rescan() {
     try {
-        logger.info('LP PAPER: scanning for 200sh reward markets...');
-        // SAFE: 1 market at a time with $500. ~$192 committed, $308 buffer.
+        logger.info('LP PAPER: scanning for ALL reward-qualifying markets...');
+        // Cast wide net — any market paying rewards, ranked by reward × liquidity
         targetMarkets = await scanForTargets({
-            minDailyReward: 50,       // $50+/day markets
-            minSize: 200,             // require 200sh min
-            maxOrderBudget: 200,      // allow NO side up to $200
-            priceMin: 0.10,
-            priceMax: 0.90,
-            maxMarkets: 1,            // 1 market only — safest for $500
+            minDailyReward: 1,        // any market paying $1+/day
+            maxOrderBudget: 200,
+            priceMin: 0.05,
+            priceMax: 0.95,
+            maxMarkets: 3,            // top 3 by liquidity-weighted score
         });
-
-        if (targetMarkets.length === 0) {
-            logger.warn('LP PAPER: no 200sh markets found — trying $10+/day...');
-            targetMarkets = await scanForTargets({
-                minDailyReward: 10,
-                maxOrderBudget: 200,
-                priceMin: 0.10,
-                priceMax: 0.90,
-                maxMarkets: 1,
-            });
-        }
 
         if (targetMarkets.length === 0) {
             logger.warn('LP PAPER: no suitable markets found');

@@ -80,8 +80,8 @@ export async function scanForTargets(opts = {}) {
         priceMin = 0.15,
         priceMax = 0.85,
         maxMarkets = 8,
-        maxSpreadFilter = 0.05,   // hard filter: skip if YES spread > this
-        minVolume = 10000,        // hard filter: skip if 24h volume < this USD
+        maxSpreadFilter = 0,      // 0 = disabled — let liquidity score rank instead
+        minVolume = 0,            // 0 = disabled — let liquidity score rank instead
     } = opts;
 
     const markets = await fetchRewardMarkets();

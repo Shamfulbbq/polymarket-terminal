@@ -55,8 +55,8 @@ async function rescan() {
         logger.info('LP: scanning for reward markets...');
         targetMarkets = await scanForTargets({
             minDailyReward: 1.0,
-            priceMin: 0.15,
-            priceMax: 0.85,
+            priceMin: 0.05,
+            priceMax: 0.95,
             maxMarkets: 5,
         });
 
