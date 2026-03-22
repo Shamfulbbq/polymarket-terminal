@@ -2,7 +2,7 @@
  * cryptoMMExecutor.js
  * Core executor for the crypto market maker bot.
  * Posts two-sided quotes on Polymarket crypto markets to earn the bid-ask spread.
- * Supports both 5-minute and 1H markets via slotDuration-derived timing.
+ * Supports 5-minute, 15-minute, 1H, and 4H markets via slotDuration-derived timing.
  *
  * Timeline per market (proportional to slotDuration):
  *   T-(75%): POST neutral two-sided quotes
@@ -44,7 +44,7 @@ const PAPER_MODE = config.dryRun;
 const CMM_MAKER_ADDRESS = config.tailSweepProxyWallet || config.proxyWallet;
 
 // Slug label lookup by slot duration (for checkOutcome)
-const SLOT_DURATION_LABEL = { 300: '5m', 3600: '1h', 14400: '4h', 86400: 'daily', 604800: 'weekly' };
+const SLOT_DURATION_LABEL = { 300: '5m', 900: '15m', 3600: '1h', 14400: '4h', 86400: 'daily', 604800: 'weekly' };
 
 // ── State ───────────────────────────────────────────────────────────────────
 
@@ -405,7 +405,55 @@ async function cleanupMarket(conditionId) {
     logger.info(`CMM: ${label} — cleaned up ${ids.length} orders before resolution`);
     logAction('cleanup', { conditionId, asset: orders.market.asset.toUpperCase(), cancelledOrders: ids.length });
 
+    // Paper mode: infer simulated fills by checking if market price crossed our quotes
+    if (PAPER_MODE && orders.yesMid !== undefined) {
+        await simulatePaperFills(conditionId, orders);
+    }
+
     // Don't delete from _activeOrders yet — outcome check needs the fills
+}
+
+/**
+ * Paper fill simulation: fetch final orderbook prices and infer whether
+ * our bid/ask quotes would have been filled based on mid price movement.
+ * Called at cleanup time (T-60s before resolution) in paper mode only.
+ *
+ * Logic: if market mid moved past our bid price → assume takers hit our bid.
+ *        if market mid moved past our ask price → assume takers hit our ask.
+ */
+async function simulatePaperFills(conditionId, orders) {
+    const { market, yesMid: originalYesMid } = orders;
+    const label = `${market.asset.toUpperCase()} [paper]`;
+
+    const [yesBook] = await Promise.all([fetchOrderbook(market.yesTokenId)]);
+    if (!yesBook) {
+        logger.info(`CMM[PAPER]: ${label} — orderbook unavailable, no fill simulation`);
+        return;
+    }
+
+    const finalMid = (yesBook.bestBid + yesBook.bestAsk) / 2;
+    const spread = parseFloat(market.spread || CMM_SPREAD);
+    const yesBidPosted = originalYesMid - spread / 2;
+    const yesAskPosted = originalYesMid + spread / 2;
+
+    // If final mid is above our ask → takers were buying YES → they crossed our ASK
+    if (finalMid > yesAskPosted) {
+        handleFill(conditionId, orders.yesAskId || 'paper-ask', 'YES', yesAskPosted, CMM_SHARES);
+        logger.info(`CMM[PAPER]: ${label} — simulated YES ASK fill (mid ${originalYesMid.toFixed(2)}→${finalMid.toFixed(2)} crossed ask ${yesAskPosted.toFixed(2)})`);
+    }
+    // If final mid is below our bid → takers were selling YES → they crossed our BID
+    if (finalMid < yesBidPosted) {
+        handleFill(conditionId, orders.yesBidId || 'paper-bid', 'YES', yesBidPosted, CMM_SHARES);
+        logger.info(`CMM[PAPER]: ${label} — simulated YES BID fill (mid ${originalYesMid.toFixed(2)}→${finalMid.toFixed(2)} crossed bid ${yesBidPosted.toFixed(2)})`);
+    }
+
+    logAction('paper_fill_simulation', {
+        conditionId, asset: market.asset.toUpperCase(),
+        originalYesMid, finalMid,
+        yesBidPosted, yesAskPosted,
+        bidFilled: finalMid < yesBidPosted,
+        askFilled: finalMid > yesAskPosted,
+    });
 }
 
 function scheduleOutcomeCheck(market) {
