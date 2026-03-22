@@ -81,10 +81,9 @@ async function buildStatusContent() {
     lines.push(`  Signal     : ${config.directionalSignal} (${config.directionalSignalMinutes}min 15m / ${config.directional1hSignalMinutes}min 1h+)`);
     lines.push(`  Entry      : $${ep} per share | Max cap: $${config.directionalMaxEntryPrice}`);
     lines.push(`  Shares     : ${sh} per trade | Cost: $${cost} | Fee: ${feeShares.toFixed(3)}sh | Win payout: $${netPayout} | Win profit: $${netProfit}`);
-    // Daily spend vs limit
+    // Session spend (display) + loss limit
     const dailySpent = getDailySpendTotal();
-    const dailyColor = dailySpent >= config.directionalDailyLossLimit * 0.8 ? 'red-fg' : 'green-fg';
-    lines.push(`  Daily spend: {${dailyColor}}$${dailySpent.toFixed(2)}{/${dailyColor}} / $${config.directionalDailyLossLimit} limit`);
+    lines.push(`  Session spend: $${dailySpent.toFixed(2)} | Loss limit: $${config.directionalDailyLossLimit > 0 ? config.directionalDailyLossLimit : 'off'}`);
     lines.push('');
 
     // Binance feed

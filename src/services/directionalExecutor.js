@@ -19,7 +19,7 @@ import { getCandlesSince, getCandlesBefore, getOrderFlowSince, getBinanceFeedSta
 import { ALL_SIGNALS } from '../backtest/signals.js';
 import { submitOrderTimed } from './client.js';
 import logger from '../utils/logger.js';
-import { logBalance } from '../utils/balanceLedger.js';
+import { logBalance, getBalancePnl } from '../utils/balanceLedger.js';
 import { validateOrderbook, isCircuitBroken } from '../utils/orderbookGuard.js';
 import fs from 'fs';
 import path from 'path';
@@ -74,9 +74,9 @@ function appendOrder(obj) {
     }
 }
 
-// ── Daily loss limit ──────────────────────────────────────────────────────────
-// Tracks cumulative trade cost placed today (UTC). Resets at midnight.
-// Conservative: counts spend even on wins (since we don't know outcome yet).
+// ── Daily spend tracker (display only) ────────────────────────────────────────
+// Tracks cumulative trade cost placed today for dashboard display.
+// The actual loss limit uses session-start balance vs live on-chain balance.
 
 let _dailyDate = new Date().toUTCString().slice(0, 11); // e.g. "22 Mar 2026"
 let _dailySpend = 0;
@@ -249,17 +249,25 @@ async function evaluateAndTrade(market, openAtMs, signalMinutes) {
 
     const cost = entryPrice * config.directionalShares;
 
-    // Daily loss limit check (V2 safety)
+    // Daily loss limit check — compares live balance to session-start balance.
+    // Wins that resolve back into the wallet reduce the loss meter. Only stops
+    // when we've actually lost $X net, not just spent it.
     const dailyLimit = config.directionalDailyLossLimit;
-    if (dailyLimit > 0) {
-        const spent = getDailySpend();
-        if (spent + cost > dailyLimit) {
-            logger.warn(
-                `DIRECTIONAL: daily limit $${dailyLimit} reached ($${spent.toFixed(2)} spent today) — skipping "${label}"`
-            );
-            logTrade(market, direction, 'skipped', 'daily_limit', null, confidence, null, orderFlow, { signalMinutes });
-            return;
-        }
+    if (dailyLimit > 0 && !config.dryRun) {
+        try {
+            const pnl = getBalancePnl();
+            const currentBalance = await getUsdcBalance();
+            if (pnl && currentBalance != null) {
+                const sessionLoss = pnl.sessionStartBalance - currentBalance;
+                if (sessionLoss >= dailyLimit) {
+                    logger.warn(
+                        `DIRECTIONAL: daily loss limit $${dailyLimit} reached (session loss $${sessionLoss.toFixed(2)}) — skipping "${label}"`
+                    );
+                    logTrade(market, direction, 'skipped', 'daily_loss_limit', null, confidence, null, orderFlow, { signalMinutes });
+                    return;
+                }
+            }
+        } catch { /* proceed if balance check fails */ }
     }
 
     // Orderbook pre-check — fetch live best ask for the target token
