@@ -30,8 +30,8 @@
     "farm:paper": "DRY_RUN=true node src/lp_farm.js",
     "cmm": "DRY_RUN=false node src/cryptoMM.js",
     "cmm:paper": "DRY_RUN=true node src/cryptoMM.js",
-    "cmm:1h": "CMM_TIMEFRAMES=1h CMM_ASSETS=btc DRY_RUN=false node src/cryptoMM.js",
-    "cmm:1h:paper": "CMM_TIMEFRAMES=1h CMM_ASSETS=btc DRY_RUN=true node src/cryptoMM.js",
+    "cmm:4h": "CMM_TIMEFRAMES=4h CMM_ASSETS=btc DRY_RUN=false node src/cryptoMM.js",
+    "cmm:4h:paper": "CMM_TIMEFRAMES=4h CMM_ASSETS=btc DRY_RUN=true node src/cryptoMM.js",
     "test": "node test/kelly.test.js && node test/lp-scoring.test.js"
   },
   "keywords": [
