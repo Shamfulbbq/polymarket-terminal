@@ -1,15 +1,14 @@
 /**
  * cryptoMMExecutor.js
  * Core executor for the crypto market maker bot.
- * Posts two-sided quotes on Polymarket 5-minute BTC/ETH/SOL crypto markets
- * to earn maker rebates + liquidity rewards. Integrates with the existing
- * directional signal to skew quotes toward the predicted winning side.
+ * Posts two-sided quotes on Polymarket crypto markets to earn the bid-ask spread.
+ * Supports both 5-minute and 1H markets via slotDuration-derived timing.
  *
- * Timeline per 5-min market:
- *   T-240s: POST neutral two-sided quotes (wide spread)
- *   T-60s:  CHECK directional signal -> SKEW quotes if signal fires
- *   T-10s:  CANCEL all orders (don't hold through resolution)
- *   T+180s: CHECK outcome, compute PnL
+ * Timeline per market (proportional to slotDuration):
+ *   T-(75%): POST neutral two-sided quotes
+ *   T-(25%): CHECK directional signal -> SKEW quotes if signal fires
+ *   T-10s/60s: CANCEL all orders before resolution
+ *   T+3min:    CHECK outcome, compute PnL
  */
 
 import { Side, OrderType } from '@polymarket/clob-client';
@@ -38,8 +37,14 @@ const CMM_MAX_DAILY_LOSS = parseFloat(process.env.CMM_MAX_DAILY_LOSS || '50');
 const CMM_SIGNAL_MINUTES = parseInt(process.env.CMM_SIGNAL_MINUTES || '3', 10);
 const CMM_SIGNAL_NAME = process.env.CMM_SIGNAL || 'momentum';
 
-const SLOT_SEC = 5 * 60;
+const SLOT_SEC = 5 * 60; // default / fallback
 const PAPER_MODE = config.dryRun;
+
+// Wallet address used for getTrades fill detection
+const CMM_MAKER_ADDRESS = config.tailSweepProxyWallet || config.proxyWallet;
+
+// Slug label lookup by slot duration (for checkOutcome)
+const SLOT_DURATION_LABEL = { 300: '5m', 3600: '1h', 14400: '4h', 86400: 'daily', 604800: 'weekly' };
 
 // ── State ───────────────────────────────────────────────────────────────────
 
@@ -91,6 +96,23 @@ function roundToTick(price, tickSize) {
     return Math.max(0.01, Math.min(0.99, Math.round(rounded * 100) / 100));
 }
 
+/**
+ * Derive quote/skew/cleanup timing offsets from slot duration.
+ * 5-min: quote T-240s, skew T-60s, cleanup T-10s
+ * 1H:    quote T-2700s (45min), skew T-900s (15min), cleanup T-60s
+ */
+function getSlotTimings(slotDuration) {
+    if (slotDuration <= 300) {
+        return { quoteOffsetMs: 240_000, skewOffsetMs: 60_000, cleanupOffsetMs: 10_000 };
+    }
+    const slotMs = slotDuration * 1000;
+    return {
+        quoteOffsetMs:   Math.round(slotMs * 0.75), // 45 min for 1H
+        skewOffsetMs:    Math.round(slotMs * 0.25), // 15 min for 1H
+        cleanupOffsetMs: 60_000,                    // 1 min for all longer markets
+    };
+}
+
 function resetDailyLossIfNeeded() {
     const today = new Date().toISOString().slice(0, 10);
     if (today !== _dailyLossResetDate) {
@@ -121,7 +143,9 @@ async function fetchOrderbook(tokenId) {
 }
 
 async function checkOutcome(market) {
-    const slug = `${market.asset}-updown-5m-${market.slotTimestamp}`;
+    const slotDuration = market.slotDuration || SLOT_SEC;
+    const tfLabel = SLOT_DURATION_LABEL[slotDuration] || '5m';
+    const slug = `${market.asset}-updown-${tfLabel}-${market.slotTimestamp}`;
     try {
         const resp = await fetch(`${config.gammaHost}/markets/slug/${slug}`, { signal: AbortSignal.timeout(10000) });
         if (!resp.ok) return null;
@@ -304,7 +328,9 @@ async function checkSignalAndSkew(market) {
         return;
     }
 
-    const signalCandles = candles.slice(0, CMM_SIGNAL_MINUTES);
+    // For 1H markets, use all available candles (not just first CMM_SIGNAL_MINUTES)
+    const slotDuration = market.slotDuration || SLOT_SEC;
+    const signalCandles = slotDuration > 300 ? candles : candles.slice(0, CMM_SIGNAL_MINUTES);
     const orderFlow = getOrderFlowSince(openAtMs);
     const { direction, confidence } = signalFn(signalCandles, { orderFlow });
 
@@ -383,9 +409,10 @@ async function cleanupMarket(conditionId) {
 }
 
 function scheduleOutcomeCheck(market) {
+    const slotDuration = market.slotDuration || SLOT_SEC;
     const slotEnd = market.endTime
         ? new Date(market.endTime).getTime()
-        : (market.slotTimestamp + SLOT_SEC) * 1000;
+        : (market.slotTimestamp + slotDuration) * 1000;
     const waitMs = Math.max(0, slotEnd - Date.now()) + 3 * 60_000; // close + 3 min
 
     setTimeout(async () => {
@@ -458,10 +485,11 @@ export function handleFill(conditionId, orderId, side, price, shares) {
 
     logAction('fill', { conditionId, asset: label, side, price, shares, orderId });
 
-    // Pre-signal cross-hedge: if fill happens before T-60s
+    // Pre-signal cross-hedge: if fill happens before the skew window
+    const fillSlotDuration = orders.market.slotDuration || SLOT_SEC;
     const slotEnd = orders.market.endTime
         ? new Date(orders.market.endTime).getTime()
-        : (orders.market.slotTimestamp + SLOT_SEC) * 1000;
+        : (orders.market.slotTimestamp + fillSlotDuration) * 1000;
     const secsLeft = (slotEnd - Date.now()) / 1000;
 
     if (secsLeft > 60) {
@@ -480,63 +508,68 @@ export function handleFill(conditionId, orderId, side, price, shares) {
 
 // ── Fill detection loop ─────────────────────────────────────────────────────
 
-const _processedFills = new Set(); // "orderId:matchedSize" — track already-processed
+const _processedFills = new Set(); // trade IDs already processed
 
 /**
- * Poll all active orders for fills. Called every 15 seconds from the entry point.
- * This is the CRITICAL missing piece — without this, fills go undetected and the
- * daily loss limit is blind.
+ * Fetch recent trades via getTrades() and detect fills for active markets.
+ * Uses actual trade events (not order state) — reliable even after cleanup.
+ * Called every 15 seconds from the entry point.
  */
 export async function checkFills() {
-    if (PAPER_MODE) return; // paper mode simulates fills differently
+    if (PAPER_MODE) return;
+    if (_activeOrders.size === 0) return;
+    if (!CMM_MAKER_ADDRESS) return;
 
-    const client = getClient();
+    let trades;
+    try {
+        const client = getClient();
+        const result = await client.getTrades({ maker_address: CMM_MAKER_ADDRESS });
+        trades = Array.isArray(result) ? result : (result?.data ?? []);
+    } catch (err) {
+        logger.warn(`CMM: fill check error — ${err.message}`);
+        return;
+    }
 
-    for (const [conditionId, orders] of _activeOrders) {
-        const orderIds = [
-            { id: orders.yesBidId, side: 'YES' },
-            { id: orders.yesAskId, side: 'YES' },
-            { id: orders.noBidId, side: 'NO' },
-            { id: orders.noAskId, side: 'NO' },
-        ];
+    const cutoffMs = Date.now() - 4 * 60 * 60 * 1000; // look back 4 hours max
 
-        for (const { id, side } of orderIds) {
-            if (!id) continue;
-            try {
-                const order = await client.getOrder(id);
-                if (!order) continue;
+    for (const trade of trades) {
+        const tradeId = trade.id || trade.trade_id;
+        if (!tradeId || _processedFills.has(tradeId)) continue;
 
-                const matched = parseFloat(order.size_matched || '0');
-                if (matched <= 0) continue;
+        const tradeTs = trade.created_at ? new Date(trade.created_at).getTime() : 0;
+        if (tradeTs < cutoffMs) continue;
 
-                const fillKey = `${id}:${matched}`;
-                if (_processedFills.has(fillKey)) continue;
-                _processedFills.add(fillKey);
+        const conditionId = trade.condition_id;
+        const orders = _activeOrders.get(conditionId);
+        if (!orders) continue; // not an active CMM market — skip
 
-                const price = parseFloat(order.price || '0');
-                const isBuy = (order.side || '').toUpperCase() === 'BUY';
+        _processedFills.add(tradeId);
 
-                // Determine if this is YES or NO based on which order ID matched
-                const fillSide = side;
+        const price = parseFloat(trade.price || '0');
+        const shares = parseFloat(trade.size || '0');
+        if (shares <= 0) continue;
 
-                logger.money(`CMM: FILL DETECTED ${fillSide} ${isBuy ? 'BUY' : 'SELL'} ${matched}sh @ $${price.toFixed(2)}`);
+        // side field is the TAKER's side. If taker BUY → they hit our ASK (we sold).
+        // If taker SELL → they hit our BID (we bought).
+        const takerBuy = (trade.side || '').toUpperCase() === 'BUY';
+        const weAreBuying = !takerBuy; // taker sold to us = we bought
 
-                // Track the fill
-                handleFill(conditionId, id, fillSide, price, matched);
+        // Determine YES vs NO by matching asset_id to the market's token IDs
+        const assetId = trade.asset_id || trade.token_id;
+        const isYes = assetId === orders.market.yesTokenId;
+        const fillSide = isYes ? 'YES' : 'NO';
 
-                // Update daily PnL estimate: if we bought, we're at risk of losing cost
-                // Actual PnL computed at outcome. For loss tracking, record cost as pending loss.
-                if (isBuy) {
-                    _stats.dailyPnl -= price * matched; // pessimistic: assume loss until outcome
-                    logger.info(`CMM: daily PnL now $${_stats.dailyPnl.toFixed(2)} (pending fill cost)`);
+        logger.money(`CMM: FILL ${fillSide} ${weAreBuying ? 'BUY' : 'SELL'} ${shares}sh @ $${price.toFixed(2)}`);
+        handleFill(conditionId, trade.maker_order_id, fillSide, price, shares);
 
-                    if (isDailyLossHit()) {
-                        logger.error(`CMM: DAILY LOSS LIMIT HIT ($${_stats.dailyPnl.toFixed(2)}) — cancelling all orders`);
-                        await cancelAllOrders();
-                        return;
-                    }
-                }
-            } catch { /* ignore individual order check failures */ }
+        // Pessimistic daily PnL: count BUY fills as cost until outcome resolves
+        if (weAreBuying) {
+            _stats.dailyPnl -= price * shares;
+            if (isDailyLossHit()) {
+                logger.error(`CMM: DAILY LOSS LIMIT HIT ($${_stats.dailyPnl.toFixed(2)}) — cancelling all orders`);
+                await cancelAllOrders();
+                return;
+            }
         }
     }
 }
@@ -544,14 +577,14 @@ export async function checkFills() {
 // ── Main schedule function ──────────────────────────────────────────────────
 
 export function scheduleMarket(market) {
+    const slotDuration = market.slotDuration || SLOT_SEC;
     const slotEnd = market.endTime
         ? new Date(market.endTime).getTime()
-        : (market.slotTimestamp + SLOT_SEC) * 1000;
+        : (market.slotTimestamp + slotDuration) * 1000;
 
     const key = `${market.asset}-${market.slotTimestamp}`;
     if (_pendingMarkets.has(key)) return;
 
-    // Check if this asset is in our configured list
     if (!CMM_ASSETS.includes(market.asset.toLowerCase())) return;
 
     resetDailyLossIfNeeded();
@@ -562,9 +595,10 @@ export function scheduleMarket(market) {
 
     const now = Date.now();
     const timers = [];
+    const { quoteOffsetMs, skewOffsetMs, cleanupOffsetMs } = getSlotTimings(slotDuration);
 
-    // T-240s: post neutral quotes
-    const quoteAtMs = slotEnd - 240_000;
+    // Post neutral quotes at T-quoteOffset
+    const quoteAtMs = slotEnd - quoteOffsetMs;
     const quoteDelay = Math.max(0, quoteAtMs - now);
     if (quoteDelay > 0 && quoteAtMs > now) {
         const t1 = setTimeout(() => {
@@ -575,8 +609,8 @@ export function scheduleMarket(market) {
         timers.push(t1);
     }
 
-    // T-60s: check signal and skew
-    const skewAtMs = slotEnd - 60_000;
+    // Check signal and skew at T-skewOffset
+    const skewAtMs = slotEnd - skewOffsetMs;
     const skewDelay = Math.max(0, skewAtMs - now);
     if (skewDelay > 0 && skewAtMs > now) {
         const t2 = setTimeout(() => {
@@ -587,8 +621,8 @@ export function scheduleMarket(market) {
         timers.push(t2);
     }
 
-    // T-10s: cancel all orders
-    const cleanupAtMs = slotEnd - 10_000;
+    // Cancel all orders at T-cleanupOffset
+    const cleanupAtMs = slotEnd - cleanupOffsetMs;
     const cleanupDelay = Math.max(0, cleanupAtMs - now);
     if (cleanupDelay > 0 && cleanupAtMs > now) {
         const t3 = setTimeout(() => {
@@ -600,13 +634,11 @@ export function scheduleMarket(market) {
     }
 
     _pendingMarkets.set(key, { timers, market });
-
-    // Schedule outcome check
     scheduleOutcomeCheck(market);
 
-    const secsUntilQuote = Math.round(quoteDelay / 1000);
+    const tfLabel = SLOT_DURATION_LABEL[slotDuration] || `${slotDuration}s`;
     logger.info(
-        `CMM: ${market.asset.toUpperCase()} scheduled — quotes in ${secsUntilQuote}s, ` +
+        `CMM: ${market.asset.toUpperCase()} [${tfLabel}] scheduled — quotes in ${Math.round(quoteDelay / 1000)}s, ` +
         `skew in ${Math.round(skewDelay / 1000)}s, cleanup in ${Math.round(cleanupDelay / 1000)}s`
     );
 }
@@ -632,13 +664,17 @@ export function getActiveMarketCount() {
 }
 
 export async function cancelAllOrders() {
-    // Cancel all active orders
-    for (const [conditionId, orders] of _activeOrders) {
-        const ids = [orders.yesBidId, orders.yesAskId, orders.noBidId, orders.noAskId].filter(Boolean);
-        for (const id of ids) {
-            await cancelOrder(id);
+    if (!PAPER_MODE) {
+        // Cancel ALL open orders on the wallet — catches stale orders from previous sessions
+        try {
+            const client = getClient();
+            await client.cancelAll();
+            logger.info('CMM: cancelAll() completed — all open orders cancelled');
+        } catch (err) {
+            logger.warn(`CMM: cancelAll() failed — ${err.message}`);
         }
     }
+
     _activeOrders.clear();
 
     // Clear pending timers

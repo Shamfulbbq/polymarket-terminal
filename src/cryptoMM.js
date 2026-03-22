@@ -94,20 +94,43 @@ process.on('SIGTERM', shutdown);
 
 // ── Start ───────────────────────────────────────────────────────────────────
 
+const CMM_TIMEFRAMES = (process.env.CMM_TIMEFRAMES || '5m').split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+const has5m = CMM_TIMEFRAMES.includes('5m');
+const longTFs = CMM_TIMEFRAMES.filter(tf => tf !== '5m');
+
 const mode = config.dryRun ? 'PAPER ($1000 virtual)' : 'LIVE';
 logger.info(`CMM starting — ${mode}`);
-logger.info(`Assets: ${CMM_ASSETS.join(', ').toUpperCase()} | Spread: ${process.env.CMM_SPREAD || '0.04'} | Shares: ${process.env.CMM_SHARES || '20'} | Max daily loss: $${process.env.CMM_MAX_DAILY_LOSS || '50'}`);
+logger.info(`Assets: ${CMM_ASSETS.join(', ').toUpperCase()} | Timeframes: ${CMM_TIMEFRAMES.join(', ')} | Spread: ${process.env.CMM_SPREAD || '0.04'} | Shares: ${process.env.CMM_SHARES || '20'} | Max daily loss: $${process.env.CMM_MAX_DAILY_LOSS || '50'}`);
+
+// Cancel any stale open orders from previous sessions before posting new quotes
+if (!config.dryRun) {
+    try {
+        const { getClient } = await import('./services/client.js');
+        await getClient().cancelAll();
+        logger.info('CMM: startup — stale orders cleared');
+    } catch (err) {
+        logger.warn(`CMM: startup cancelAll failed — ${err.message}`);
+    }
+}
 
 // Start Binance feed for signal data
 startBinanceFeed();
 
-// Start sniper detector — it detects all 5-min markets
-// Override sniper assets to include our CMM assets
-const origAssets = config.sniperAssets;
-config.sniperAssets = [...new Set([...origAssets, ...CMM_ASSETS])];
-startSniperDetector(handleNewMarket);
+// 5-minute markets — only if '5m' is in CMM_TIMEFRAMES
+if (has5m) {
+    const origAssets = config.sniperAssets;
+    config.sniperAssets = [...new Set([...origAssets, ...CMM_ASSETS])];
+    startSniperDetector(handleNewMarket);
+    logger.info('CMM: 5m detector started');
+}
 
-// Fill detection every 15 seconds — CRITICAL for loss tracking
+// 1H+ markets
+if (longTFs.length > 0) {
+    startTimeframeDetector(longTFs, CMM_ASSETS, handleNewMarket);
+    logger.info(`CMM: timeframe detector started — ${longTFs.join(', ')}`);
+}
+
+// Fill detection every 15 seconds — uses getTrades() for reliable fill tracking
 const fillTimer = setInterval(async () => {
     try { await checkFills(); } catch (err) { logger.warn(`CMM: fill check error — ${err.message}`); }
 }, 15_000);
@@ -115,12 +138,5 @@ const fillTimer = setInterval(async () => {
 // Status logging every 60 seconds
 statusTimer = setInterval(logStatus, 60_000);
 logStatus();
-
-// Longer crypto timeframes (1H, 4H, daily) — enabled via CMM_TIMEFRAMES env
-const extraTFs = (process.env.CMM_TIMEFRAMES || '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
-if (extraTFs.length > 0) {
-    startTimeframeDetector(extraTFs, CMM_ASSETS, handleNewMarket);
-    logger.info(`CMM: extra timeframes enabled: ${extraTFs.join(', ')}`);
-}
 
 logger.info('CMM: waiting for markets...');
