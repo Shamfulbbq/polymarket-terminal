@@ -101,6 +101,15 @@ const config = {
   directionalBlockedHours: (process.env.DIRECTIONAL_BLOCKED_HOURS || '0,3,8,12,14,15,19,22')
                              .split(',').map(h => parseInt(h.trim(), 10)).filter(h => !isNaN(h)),
 
+  // V2 safety and signal config
+  directionalDailyLossLimit: parseFloat(process.env.DIRECTIONAL_DAILY_LOSS_LIMIT || '10'),
+  directionalMaxEntryPrice:  parseFloat(process.env.DIRECTIONAL_MAX_ENTRY_PRICE  || '0.60'),
+  // Comma-separated timeframes: '15m', '1h', '4h'. 15m uses directionalDetector; others use cryptoTimeframeDetector.
+  directionalTimeframes: (process.env.DIRECTIONAL_TIMEFRAMES || '15m')
+                           .split(',').map(s => s.trim()).filter(Boolean),
+  // Signal window for 1H+ markets (minutes after open to wait before reading candles)
+  directional1hSignalMinutes: parseInt(process.env.DIRECTIONAL_1H_SIGNAL_MINUTES || '15', 10),
+
   // ── Tail Sweep (5-min late-entry) ──────────────────────────────
   tailSweepAssets: (process.env.TAIL_SWEEP_ASSETS || 'btc,eth,sol')
                      .split(',').map((s) => s.trim().toLowerCase()).filter(Boolean),
@@ -192,8 +201,15 @@ export function validateDirectionalConfig() {
     throw new Error('DIRECTIONAL_ENTRY_PRICE must be between 0 and 1');
   if (config.directionalShares <= 0)
     throw new Error('DIRECTIONAL_SHARES must be > 0');
-  if (config.directionalSignalMinutes < 1 || config.directionalSignalMinutes > 14)
-    throw new Error('DIRECTIONAL_SIGNAL_MINUTES must be between 1 and 14');
+  // 0 = instant signal (T+0 OBI/CVD only, no candle wait)
+  if (config.directionalSignalMinutes < 0 || config.directionalSignalMinutes > 14)
+    throw new Error('DIRECTIONAL_SIGNAL_MINUTES must be between 0 and 14');
+  if (config.directionalMaxEntryPrice <= 0 || config.directionalMaxEntryPrice >= 1)
+    throw new Error('DIRECTIONAL_MAX_ENTRY_PRICE must be between 0 and 1');
+  if (config.directionalDailyLossLimit <= 0)
+    throw new Error('DIRECTIONAL_DAILY_LOSS_LIMIT must be > 0');
+  if (config.directional1hSignalMinutes < 1 || config.directional1hSignalMinutes > 55)
+    throw new Error('DIRECTIONAL_1H_SIGNAL_MINUTES must be between 1 and 55');
 }
 
 // Validation for tail-sweep bot

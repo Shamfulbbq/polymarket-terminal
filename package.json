@@ -20,6 +20,8 @@
     "outcomes-report": "node scripts/backfill-outcomes.js --report-only",
     "directional": "DRY_RUN=false node src/directionalSniper.js",
     "directional-sim": "DRY_RUN=true node src/directionalSniper.js",
+    "directional-v2": "DIRECTIONAL_TIMEFRAMES=15m,1h DIRECTIONAL_SIGNAL=preMomentumComposite DIRECTIONAL_SIGNAL_MINUTES=0 DIRECTIONAL_ENTRY_PRICE=0.55 DIRECTIONAL_MAX_ENTRY_PRICE=0.60 DIRECTIONAL_DAILY_LOSS_LIMIT=10 DRY_RUN=false node src/directionalSniper.js",
+    "directional-v2-sim": "DIRECTIONAL_TIMEFRAMES=15m,1h DIRECTIONAL_SIGNAL=preMomentumComposite DIRECTIONAL_SIGNAL_MINUTES=0 DIRECTIONAL_ENTRY_PRICE=0.55 DIRECTIONAL_MAX_ENTRY_PRICE=0.60 DIRECTIONAL_DAILY_LOSS_LIMIT=10 DRY_RUN=true node src/directionalSniper.js",
     "tailsweep": "DRY_RUN=false node src/tailSweep.js",
     "tailsweep-sim": "DRY_RUN=true node src/tailSweep.js",
     "lp": "node src/lp.js",
