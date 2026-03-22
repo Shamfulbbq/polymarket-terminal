@@ -26,6 +26,8 @@
     "lp:paper": "LP_PAPER=true node src/lp_paper.js",
     "farm": "DRY_RUN=false node src/lp_farm.js",
     "farm:paper": "DRY_RUN=true node src/lp_farm.js",
+    "cmm": "DRY_RUN=false node src/cryptoMM.js",
+    "cmm:paper": "DRY_RUN=true node src/cryptoMM.js",
     "test": "node test/kelly.test.js && node test/lp-scoring.test.js"
   },
   "keywords": [
