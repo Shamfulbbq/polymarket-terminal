@@ -32,6 +32,8 @@
     "cmm:paper": "DRY_RUN=true node src/cryptoMM.js",
     "cmm:4h": "CMM_TIMEFRAMES=4h CMM_ASSETS=btc CMM_SPREAD=0.02 CMM_SHARES=10 DRY_RUN=false node src/cryptoMM.js",
     "cmm:4h:paper": "CMM_TIMEFRAMES=4h CMM_ASSETS=btc CMM_SPREAD=0.02 CMM_SHARES=20 DRY_RUN=true node src/cryptoMM.js",
+    "cmm:15m": "CMM_TIMEFRAMES=15m CMM_ASSETS=btc CMM_SPREAD=0.02 CMM_SHARES=10 DRY_RUN=false node src/cryptoMM.js",
+    "cmm:15m:paper": "CMM_TIMEFRAMES=15m CMM_ASSETS=btc CMM_SPREAD=0.02 CMM_SHARES=20 DRY_RUN=true node src/cryptoMM.js",
     "test": "node test/kelly.test.js && node test/lp-scoring.test.js"
   },
   "keywords": [

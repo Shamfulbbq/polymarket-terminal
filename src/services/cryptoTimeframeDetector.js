@@ -11,9 +11,10 @@ import config from '../config/index.js';
 import logger from '../utils/logger.js';
 
 const TIMEFRAMES = {
-    '1h':     { slotSec: 3600,        label: '1h',     pollMs: 60_000 },
-    '4h':     { slotSec: 4 * 3600,    label: '4h',     pollMs: 120_000 },
-    'daily':  { slotSec: 24 * 3600,   label: 'daily',  pollMs: 300_000 },
+    '15m':    { slotSec: 900,          label: '15m',    pollMs: 30_000 },
+    '1h':     { slotSec: 3600,         label: '1h',     pollMs: 60_000 },
+    '4h':     { slotSec: 4 * 3600,     label: '4h',     pollMs: 120_000 },
+    'daily':  { slotSec: 24 * 3600,    label: 'daily',  pollMs: 300_000 },
     'weekly': { slotSec: 7 * 24 * 3600, label: 'weekly', pollMs: 600_000 },
 };
 
