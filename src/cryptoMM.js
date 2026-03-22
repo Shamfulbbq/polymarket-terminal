@@ -13,6 +13,7 @@ import logger from './utils/logger.js';
 import { initClientWithKeys } from './services/client.js';
 import { startBinanceFeed, stopBinanceFeed, getBinanceFeedStatus } from './services/binanceFeed.js';
 import { startSniperDetector, stopSniperDetector } from './services/sniperDetector.js';
+import { startTimeframeDetector, stopTimeframeDetector } from './services/cryptoTimeframeDetector.js';
 import { scheduleMarket, getMMStats, cancelAllOrders, isDailyLossHit, CMM_ASSETS } from './services/cryptoMMExecutor.js';
 
 // ── Validate ────────────────────────────────────────────────────────────────
@@ -75,6 +76,7 @@ function logStatus() {
 async function shutdown() {
     logger.warn('CMM: shutting down...');
     stopSniperDetector();
+    stopTimeframeDetector();
     stopBinanceFeed();
     await cancelAllOrders();
     if (statusTimer) clearInterval(statusTimer);
@@ -108,4 +110,11 @@ startSniperDetector(handleNewMarket);
 statusTimer = setInterval(logStatus, 60_000);
 logStatus();
 
-logger.info('CMM: waiting for 5-minute markets...');
+// Longer crypto timeframes (1H, 4H, daily) — enabled via CMM_TIMEFRAMES env
+const extraTFs = (process.env.CMM_TIMEFRAMES || '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+if (extraTFs.length > 0) {
+    startTimeframeDetector(extraTFs, CMM_ASSETS, handleNewMarket);
+    logger.info(`CMM: extra timeframes enabled: ${extraTFs.join(', ')}`);
+}
+
+logger.info('CMM: waiting for markets...');

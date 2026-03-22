@@ -114,6 +114,7 @@ const config = {
   tailSweepBlockedHours:  (process.env.TAIL_SWEEP_BLOCKED_HOURS || '')
                             .split(',').map(h => parseInt(h.trim(), 10)).filter(h => !isNaN(h)),
   tailSweepMaxShares:     parseFloat(process.env.TAIL_SWEEP_MAX_SHARES     || '20'),  // hard cap for Kelly
+  tailSweepMakerMode:    process.env.TAIL_SWEEP_MAKER === 'true', // place limit at bestBid+tick instead of bestAsk
   tailSweepKellyEnabled:  process.env.TAIL_SWEEP_KELLY === 'true',
   tailSweepKellyMinTrades: parseInt(process.env.TAIL_SWEEP_KELLY_MIN_TRADES || '30', 10),
   tailSweep15m:           process.env.TAIL_SWEEP_15M === 'true',

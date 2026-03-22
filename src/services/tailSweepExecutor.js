@@ -220,20 +220,31 @@ async function executeSweep(market, slotEndMs) {
         return;
     }
 
+    // Entry price band — check against actual entry price (maker or taker)
+    // Entry price is computed below after maker mode check
+
+
+    // Entry price: maker mode posts at bestBid+tick (earns rebate), taker mode buys at bestAsk (pays fee)
+    const tick = parseFloat(market.tickSize || '0.01') || 0.01;
+    const entryPrice = config.tailSweepMakerMode
+        ? Math.round((dominantBid + tick) / tick) * tick  // bestBid + 1 tick (rests as maker)
+        : dominantAsk;                                      // bestAsk (immediate fill as taker)
+
+    if (config.tailSweepMakerMode) {
+        logger.info(`TAILSWEEP: MAKER mode — bid+tick $${entryPrice.toFixed(2)} (vs ask $${dominantAsk.toFixed(2)})`);
+    }
+
     // Entry price band — only trade in the sweet spot
-    if (minPrice > 0 && dominantAsk < minPrice) {
-        logger.info(`TAILSWEEP: ${label} — ${dominantSide} ask $${dominantAsk.toFixed(2)} below min $${minPrice} — skipping`);
+    if (minPrice > 0 && entryPrice < minPrice) {
+        logger.info(`TAILSWEEP: ${label} — ${dominantSide} entry $${entryPrice.toFixed(2)} below min $${minPrice} — skipping`);
         logOrder(market, dominantSide, dominantBid, dominantAsk, dominantLiq, 'skipped', 'below_price_floor');
         return;
     }
-    if (maxPrice > 0 && dominantAsk > maxPrice) {
-        logger.info(`TAILSWEEP: ${label} — ${dominantSide} ask $${dominantAsk.toFixed(2)} above max $${maxPrice} — skipping`);
+    if (maxPrice > 0 && entryPrice > maxPrice) {
+        logger.info(`TAILSWEEP: ${label} — ${dominantSide} entry $${entryPrice.toFixed(2)} above max $${maxPrice} — skipping`);
         logOrder(market, dominantSide, dominantBid, dominantAsk, dominantLiq, 'skipped', 'above_price_ceiling');
         return;
     }
-
-    // Position sizing: Kelly or flat
-    const entryPrice = dominantAsk;
     const stats = getStats(asset);
     let shares;
     if (config.tailSweepKellyEnabled && stats.total >= config.tailSweepKellyMinTrades) {
