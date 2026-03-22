@@ -24,6 +24,8 @@
     "tailsweep-sim": "DRY_RUN=true node src/tailSweep.js",
     "lp": "node src/lp.js",
     "lp:paper": "LP_PAPER=true node src/lp_paper.js",
+    "farm": "DRY_RUN=false node src/lp_farm.js",
+    "farm:paper": "DRY_RUN=true node src/lp_farm.js",
     "test": "node test/kelly.test.js && node test/lp-scoring.test.js"
   },
   "keywords": [
