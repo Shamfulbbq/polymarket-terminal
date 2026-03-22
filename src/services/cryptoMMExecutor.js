@@ -478,6 +478,69 @@ export function handleFill(conditionId, orderId, side, price, shares) {
     }
 }
 
+// ── Fill detection loop ─────────────────────────────────────────────────────
+
+const _processedFills = new Set(); // "orderId:matchedSize" — track already-processed
+
+/**
+ * Poll all active orders for fills. Called every 15 seconds from the entry point.
+ * This is the CRITICAL missing piece — without this, fills go undetected and the
+ * daily loss limit is blind.
+ */
+export async function checkFills() {
+    if (PAPER_MODE) return; // paper mode simulates fills differently
+
+    const client = getClient();
+
+    for (const [conditionId, orders] of _activeOrders) {
+        const orderIds = [
+            { id: orders.yesBidId, side: 'YES' },
+            { id: orders.yesAskId, side: 'YES' },
+            { id: orders.noBidId, side: 'NO' },
+            { id: orders.noAskId, side: 'NO' },
+        ];
+
+        for (const { id, side } of orderIds) {
+            if (!id) continue;
+            try {
+                const order = await client.getOrder(id);
+                if (!order) continue;
+
+                const matched = parseFloat(order.size_matched || '0');
+                if (matched <= 0) continue;
+
+                const fillKey = `${id}:${matched}`;
+                if (_processedFills.has(fillKey)) continue;
+                _processedFills.add(fillKey);
+
+                const price = parseFloat(order.price || '0');
+                const isBuy = (order.side || '').toUpperCase() === 'BUY';
+
+                // Determine if this is YES or NO based on which order ID matched
+                const fillSide = side;
+
+                logger.money(`CMM: FILL DETECTED ${fillSide} ${isBuy ? 'BUY' : 'SELL'} ${matched}sh @ $${price.toFixed(2)}`);
+
+                // Track the fill
+                handleFill(conditionId, id, fillSide, price, matched);
+
+                // Update daily PnL estimate: if we bought, we're at risk of losing cost
+                // Actual PnL computed at outcome. For loss tracking, record cost as pending loss.
+                if (isBuy) {
+                    _stats.dailyPnl -= price * matched; // pessimistic: assume loss until outcome
+                    logger.info(`CMM: daily PnL now $${_stats.dailyPnl.toFixed(2)} (pending fill cost)`);
+
+                    if (isDailyLossHit()) {
+                        logger.error(`CMM: DAILY LOSS LIMIT HIT ($${_stats.dailyPnl.toFixed(2)}) — cancelling all orders`);
+                        await cancelAllOrders();
+                        return;
+                    }
+                }
+            } catch { /* ignore individual order check failures */ }
+        }
+    }
+}
+
 // ── Main schedule function ──────────────────────────────────────────────────
 
 export function scheduleMarket(market) {

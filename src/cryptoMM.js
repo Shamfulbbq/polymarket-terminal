@@ -14,7 +14,7 @@ import { initClientWithKeys } from './services/client.js';
 import { startBinanceFeed, stopBinanceFeed, getBinanceFeedStatus } from './services/binanceFeed.js';
 import { startSniperDetector, stopSniperDetector } from './services/sniperDetector.js';
 import { startTimeframeDetector, stopTimeframeDetector } from './services/cryptoTimeframeDetector.js';
-import { scheduleMarket, getMMStats, cancelAllOrders, isDailyLossHit, CMM_ASSETS } from './services/cryptoMMExecutor.js';
+import { scheduleMarket, getMMStats, cancelAllOrders, isDailyLossHit, checkFills, CMM_ASSETS } from './services/cryptoMMExecutor.js';
 
 // ── Validate ────────────────────────────────────────────────────────────────
 
@@ -79,6 +79,7 @@ async function shutdown() {
     stopTimeframeDetector();
     stopBinanceFeed();
     await cancelAllOrders();
+    if (fillTimer) clearInterval(fillTimer);
     if (statusTimer) clearInterval(statusTimer);
 
     const stats = getMMStats();
@@ -105,6 +106,11 @@ startBinanceFeed();
 const origAssets = config.sniperAssets;
 config.sniperAssets = [...new Set([...origAssets, ...CMM_ASSETS])];
 startSniperDetector(handleNewMarket);
+
+// Fill detection every 15 seconds — CRITICAL for loss tracking
+const fillTimer = setInterval(async () => {
+    try { await checkFills(); } catch (err) { logger.warn(`CMM: fill check error — ${err.message}`); }
+}, 15_000);
 
 // Status logging every 60 seconds
 statusTimer = setInterval(logStatus, 60_000);
