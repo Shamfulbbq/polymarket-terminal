@@ -49,6 +49,22 @@ export async function initClient() {
 }
 
 /**
+ * Initialize client with explicit private key + proxy wallet (overrides config).
+ * Used by bots that operate with a different wallet than the default .env keys.
+ */
+export async function initClientWithKeys(privateKey, proxyWallet) {
+    const saved = { key: config.privateKey, proxy: config.proxyWallet };
+    config.privateKey = privateKey;
+    config.proxyWallet = proxyWallet;
+    try {
+        return await initClient();
+    } finally {
+        config.privateKey = saved.key;
+        config.proxyWallet = saved.proxy;
+    }
+}
+
+/**
  * Get the initialized CLOB client
  */
 export function getClient() {
