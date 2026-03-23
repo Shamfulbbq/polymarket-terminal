@@ -15,6 +15,7 @@ import { startBinanceFeed, stopBinanceFeed, getBinanceFeedStatus } from './servi
 import { startSniperDetector, stopSniperDetector } from './services/sniperDetector.js';
 import { startTimeframeDetector, stopTimeframeDetector } from './services/cryptoTimeframeDetector.js';
 import { scheduleMarket, getMMStats, cancelAllOrders, isDailyLossHit, checkFills, CMM_ASSETS } from './services/cryptoMMExecutor.js';
+import { sendCmmReport, ENABLED as TELEGRAM_ENABLED } from './services/telegram.js';
 
 // ── Validate ────────────────────────────────────────────────────────────────
 
@@ -66,8 +67,7 @@ function logStatus() {
         `fills=${stats.fills} W=${stats.wins} L=${stats.losses} | ` +
         `daily=${dailyPnlStr}${lossLimit} | ` +
         `rewards~$${stats.dailyRewardEstimate.toFixed(2)} | ` +
-        `feed=${feedStatus} BTC=${priceStr}` +
-        (stats.paperBalance != null ? ` | paper=$${stats.paperBalance.toFixed(2)}` : '')
+        `feed=${feedStatus} BTC=${priceStr}`
     );
 }
 
@@ -138,5 +138,26 @@ const fillTimer = setInterval(async () => {
 // Status logging every 60 seconds
 statusTimer = setInterval(logStatus, 60_000);
 logStatus();
+
+// Telegram report 3x/day at 00:00, 08:00, 16:00 UTC
+if (TELEGRAM_ENABLED) {
+    function msUntilNextReport() {
+        const now = new Date();
+        const h = now.getUTCHours();
+        const nextHour = [0, 8, 16].find(t => t > h) ?? 24;
+        const next = new Date(now);
+        next.setUTCHours(nextHour % 24, 0, 0, 0);
+        if (nextHour === 24) next.setUTCDate(next.getUTCDate() + 1);
+        return next.getTime() - now.getTime();
+    }
+    function scheduleNextReport() {
+        setTimeout(async () => {
+            try { await sendCmmReport(getMMStats(), CMM_TIMEFRAMES); } catch {}
+            scheduleNextReport();
+        }, msUntilNextReport());
+    }
+    scheduleNextReport();
+    logger.info(`CMM: Telegram reports enabled — next at next 00/08/16 UTC boundary`);
+}
 
 logger.info('CMM: waiting for markets...');

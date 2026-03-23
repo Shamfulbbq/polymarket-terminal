@@ -504,8 +504,10 @@ function scheduleOutcomeCheck(market) {
         const emoji = marketPnl >= 0 ? 'WIN' : 'LOSS';
         logger.money(`CMM: ${emoji} ${label} — outcome=${outcome} fills=${fills.length} pnl=${pnlStr} | daily=$${_stats.dailyPnl.toFixed(2)}`);
 
+        const tfLabel = SLOT_DURATION_LABEL[slotDuration] || `${slotDuration}s`;
         logAction('outcome', {
             conditionId, asset: asset.toUpperCase(),
+            timeframe: tfLabel,
             outcome, fills: fills.length, marketPnl,
             dailyPnl: _stats.dailyPnl,
         });
@@ -694,6 +696,7 @@ export function scheduleMarket(market) {
 // ── Public API ──────────────────────────────────────────────────────────────
 
 export function isDailyLossHit() {
+    if (PAPER_MODE) return false; // no loss limit in paper mode
     resetDailyLossIfNeeded();
     return _stats.dailyPnl <= -CMM_MAX_DAILY_LOSS;
 }
