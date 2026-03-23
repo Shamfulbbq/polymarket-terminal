@@ -18,10 +18,14 @@
     "backtest": "node src/backtest/run.js",
     "outcomes": "node scripts/backfill-outcomes.js",
     "outcomes-report": "node scripts/backfill-outcomes.js --report-only",
+    "ou-outcomes": "node scripts/backfill-sports-ou-outcomes.js",
+    "ou-outcomes-report": "node scripts/backfill-sports-ou-outcomes.js --report-only",
     "directional": "DRY_RUN=false node src/directionalSniper.js",
     "directional-sim": "DRY_RUN=true node src/directionalSniper.js",
     "directional-v2": "DIRECTIONAL_TIMEFRAMES=15m,1h DIRECTIONAL_SIGNAL=preMomentumComposite DIRECTIONAL_SIGNAL_MINUTES=0 DIRECTIONAL_ENTRY_PRICE=0.55 DIRECTIONAL_MAX_ENTRY_PRICE=0.60 DRY_RUN=false node src/directionalSniper.js",
     "directional-v2-sim": "DIRECTIONAL_TIMEFRAMES=15m,1h DIRECTIONAL_SIGNAL=preMomentumComposite DIRECTIONAL_SIGNAL_MINUTES=0 DIRECTIONAL_ENTRY_PRICE=0.55 DIRECTIONAL_MAX_ENTRY_PRICE=0.60 DRY_RUN=true node src/directionalSniper.js",
+    "directional-v3": "DIRECTIONAL_SIGNAL=orderFlowComposite DIRECTIONAL_SIGNAL_MINUTES=3 DIRECTIONAL_ENTRY_PRICE=0.55 DIRECTIONAL_MAX_ENTRY_PRICE=0.60 DIRECTIONAL_DAILY_LOSS_LIMIT=25 DIRECTIONAL_BLOCKED_HOURS=0,3,5,8,12,14,15,19,22 DRY_RUN=false node src/directionalSniper.js",
+    "directional-v3-sim": "DIRECTIONAL_SIGNAL=orderFlowComposite DIRECTIONAL_SIGNAL_MINUTES=3 DIRECTIONAL_ENTRY_PRICE=0.55 DIRECTIONAL_MAX_ENTRY_PRICE=0.60 DIRECTIONAL_DAILY_LOSS_LIMIT=25 DIRECTIONAL_BLOCKED_HOURS=0,3,5,8,12,14,15,19,22 DRY_RUN=true node src/directionalSniper.js",
     "tailsweep": "DRY_RUN=false node src/tailSweep.js",
     "tailsweep-sim": "DRY_RUN=true node src/tailSweep.js",
     "lp": "node src/lp.js",
@@ -34,6 +38,8 @@
     "cmm:4h:paper": "CMM_TIMEFRAMES=4h CMM_ASSETS=btc CMM_SPREAD=0.02 CMM_SHARES=20 DRY_RUN=true node src/cryptoMM.js",
     "cmm:15m": "CMM_TIMEFRAMES=15m CMM_ASSETS=btc CMM_SPREAD=0.02 CMM_SHARES=10 DRY_RUN=false node src/cryptoMM.js",
     "cmm:15m:paper": "CMM_TIMEFRAMES=15m CMM_ASSETS=btc CMM_SPREAD=0.02 CMM_SHARES=20 DRY_RUN=true node src/cryptoMM.js",
+    "sports-ou": "cross-env DRY_RUN=false node src/sportsOU.js",
+    "sports-ou-sim": "cross-env DRY_RUN=true node src/sportsOU.js",
     "test": "node test/kelly.test.js && node test/lp-scoring.test.js"
   },
   "keywords": [
@@ -51,6 +57,7 @@
     "ws": "^8.19.0"
   },
   "devDependencies": {
+    "cross-env": "^10.1.0",
     "nodemon": "^3.1.9"
   }
 }
