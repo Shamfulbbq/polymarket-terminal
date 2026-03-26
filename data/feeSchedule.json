@@ -1,0 +1,16 @@
+{
+  "lastUpdated": "2026-03-26",
+  "categories": {
+    "crypto":      { "C": 0.25,  "exponent": 2,   "rebateRate": 0.20 },
+    "crypto_15m":  { "C": 0.288, "exponent": 2,   "rebateRate": 0.20 },
+    "weather":     { "C": 0.16,  "exponent": 2,   "rebateRate": 0.20 },
+    "sports":      { "C": 0.03,  "exponent": 0.5, "rebateRate": 0.25 },
+    "politics":    { "C": 0.16,  "exponent": 2,   "rebateRate": 0.20 },
+    "finance":     { "C": 0.16,  "exponent": 2,   "rebateRate": 0.20 },
+    "tech":        { "C": 0.16,  "exponent": 2,   "rebateRate": 0.20 },
+    "mentions":    { "C": 0.24,  "exponent": 2,   "rebateRate": 0.20 },
+    "culture":     { "C": 0.16,  "exponent": 2,   "rebateRate": 0.20 },
+    "economics":   { "C": 0.24,  "exponent": 2,   "rebateRate": 0.20 },
+    "geopolitics": { "C": 0.00,  "exponent": 2,   "rebateRate": 0.00 }
+  }
+}

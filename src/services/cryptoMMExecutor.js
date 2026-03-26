@@ -19,9 +19,59 @@ import { ALL_SIGNALS } from '../backtest/signals.js';
 import { checkResolutionOnChain } from './ctf.js';
 import { validateOrderbook, isCircuitBroken } from '../utils/orderbookGuard.js';
 import logger from '../utils/logger.js';
+import { computeFee, getRebateRate } from './feeSchedule.js';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+
+// ── Signal quality filter (ONNX) ─────────────────────────────────────────────
+// Fail-open: if model unavailable, all signals pass through unchanged.
+let _signalModels = {}; // asset -> ort.InferenceSession
+
+async function loadSignalModels() {
+    try {
+        const ort = await import('onnxruntime-node');
+        const modelsDir = path.join(__dirname, '..', '..', 'models');
+        for (const asset of ['btc', 'eth', 'sol']) {
+            const modelPath = path.join(modelsDir, `${asset}_signal.onnx`);
+            if (fs.existsSync(modelPath)) {
+                try {
+                    _signalModels[asset] = await ort.InferenceSession.create(modelPath);
+                    logger.info(`CMM: signal model loaded for ${asset.toUpperCase()} (${modelPath})`);
+                } catch (err) {
+                    logger.warn(`CMM: failed to load ${asset} signal model — ${err.message} (fail-open)`);
+                }
+            }
+        }
+    } catch {
+        logger.info('CMM: onnxruntime-node not available — signal filter disabled (fail-open)');
+    }
+}
+
+const CMM_SIGNAL_THRESHOLD = parseFloat(process.env.CMM_SIGNAL_THRESHOLD || '0.5');
+const SIGNAL_FEATURE_COLS = [
+    'obi', 'cvd_direction', 'confidence', 'direction',
+    'slot_duration', 'yes_mid', 'price_distance', 'fill_count',
+    'asset_btc', 'asset_eth', 'asset_sol',
+    'ret_1h', 'ret_4h', 'ret_15m', 'vol_1h', 'vol_ratio',
+];
+
+function scoreSignal(asset, features) {
+    const session = _signalModels[asset.toLowerCase()];
+    if (!session) return null; // model not loaded — fail open
+
+    try {
+        const ort = require('onnxruntime-node'); // sync require after async import
+        const row = SIGNAL_FEATURE_COLS.map(k => features[k] ?? 0);
+        const tensor = new ort.Tensor('float32', Float32Array.from(row), [1, row.length]);
+        const results = session.runSync({ float_input: tensor });
+        const probs = results['output_probability']?.data ?? results[Object.keys(results)[0]]?.data;
+        return probs ? probs[1] : null; // probability of class 1 (signal correct)
+    } catch (err) {
+        logger.warn(`CMM: signal model inference error — ${err.message} (fail-open)`);
+        return null;
+    }
+}
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = path.join(__dirname, '..', '..', 'data');
@@ -86,7 +136,7 @@ function logAction(action, data) {
 }
 
 function computeFeeShares(shares, price) {
-    return shares * 0.25 * Math.pow(price * (1 - price), 2);
+    return computeFee(shares, price, 'crypto');
 }
 
 function roundToTick(price, tickSize) {
@@ -283,7 +333,7 @@ async function postNeutralQuotes(market) {
     _stats.marketsQuoted++;
 
     // Estimate reward: maker orders within ~4c of mid earn rewards
-    const rewardEstPerSide = computeFeeShares(shares, yesMid) * 0.20;
+    const rewardEstPerSide = computeFeeShares(shares, yesMid) * getRebateRate('crypto');
     _stats.dailyRewardEstimate += rewardEstPerSide * 4; // 4 orders
 
     logger.info(
@@ -340,7 +390,26 @@ async function checkSignalAndSkew(market) {
         return;
     }
 
-    logger.info(`CMM: ${label} — signal=${direction} (${(confidence * 100).toFixed(0)}% conf) — skewing quotes`);
+    // ML signal quality filter (fail-open: null score = pass through)
+    const modelFeatures = {
+        obi: orderFlow.obiAvg, cvd_direction: orderFlow.cvd > 0 ? 1 : -1,
+        confidence, direction: direction === 'UP' ? 1 : -1,
+        slot_duration: slotDuration, yes_mid: orders.yesMid,
+        price_distance: Math.abs(orders.yesMid - 0.5), fill_count: 0,
+        asset_btc: asset.toLowerCase() === 'btc' ? 1 : 0,
+        asset_eth: asset.toLowerCase() === 'eth' ? 1 : 0,
+        asset_sol: asset.toLowerCase() === 'sol' ? 1 : 0,
+        ret_1h: 0, ret_4h: 0, ret_15m: 0, vol_1h: 0, vol_ratio: 1,
+    };
+    const modelScore = scoreSignal(asset, modelFeatures);
+
+    if (modelScore !== null && modelScore < CMM_SIGNAL_THRESHOLD) {
+        logger.info(`CMM: ${label} — signal=${direction} filtered by model (score=${modelScore.toFixed(3)} < ${CMM_SIGNAL_THRESHOLD}) — keeping neutral`);
+        logAction('signal_filtered', { conditionId, asset: asset.toUpperCase(), direction, confidence, modelScore, threshold: CMM_SIGNAL_THRESHOLD });
+        return;
+    }
+
+    logger.info(`CMM: ${label} — signal=${direction} (${(confidence * 100).toFixed(0)}% conf${modelScore !== null ? ` score=${modelScore.toFixed(3)}` : ''}) — skewing quotes`);
 
     // Skew logic:
     // If UP: cancel YES ASK + NO BID (don't sell the winner, don't buy the loser)
@@ -388,6 +457,9 @@ async function checkSignalAndSkew(market) {
         conditionId, asset: asset.toUpperCase(),
         direction, confidence,
         obi: orderFlow.obiAvg, cvd: orderFlow.cvd,
+        slotDuration: market.slotDuration || SLOT_SEC,
+        yesMid: orders.yesMid,
+        ...(modelScore !== null && { modelScore: parseFloat(modelScore.toFixed(4)) }),
     });
 }
 
@@ -529,11 +601,12 @@ export function handleFill(conditionId, orderId, side, price, shares) {
 
     const label = `${orders.market.asset.toUpperCase()}`;
     const fee = computeFeeShares(shares, price);
-    _stats.dailyFeesSaved += fee * 0.20; // maker rebate estimate
+    const rebateRate = getRebateRate('crypto');
+    _stats.dailyFeesSaved += fee * rebateRate; // maker rebate estimate
 
-    logger.info(`CMM: FILL ${label} ${side} @ $${price.toFixed(2)} x ${shares}sh — fee=${fee.toFixed(3)}sh rebate=$${(fee * 0.20).toFixed(3)}`);
+    logger.info(`CMM: FILL ${label} ${side} @ $${price.toFixed(2)} x ${shares}sh — fee=${fee.toFixed(3)}sh rebate=$${(fee * rebateRate).toFixed(3)}`);
 
-    logAction('fill', { conditionId, asset: label, side, price, shares, orderId });
+    logAction('fill', { conditionId, asset: label, side, price, shares, orderId, fillPrice: price });
 
     // Pre-signal cross-hedge: if fill happens before the skew window
     const fillSlotDuration = orders.market.slotDuration || SLOT_SEC;
@@ -737,4 +810,4 @@ export async function cancelAllOrders() {
     logger.info('CMM: all orders cancelled and timers cleared');
 }
 
-export { CMM_ASSETS };
+export { CMM_ASSETS, loadSignalModels };
