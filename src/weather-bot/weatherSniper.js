@@ -99,19 +99,45 @@ async function handleNewWeatherMarket(market) {
 
     logger.info(`WEATHER: Forecast for ${data.city} is ${forecast}F (Target is ${data.targetTemperature}F)`);
 
-    // Simple strategy: buy "YES" if forecast > target, buy "NO" if forecast < target
+    // Hedging / Confidence Interval Strategy
+    // The ML model has an error of ~1.5F. 
+    // If the forecast is within 1.5F of the target, we "hedge" by reducing position size.
+    // If the forecast is outside the error margin, we take a "high confidence" large position.
+    
+    const ERROR_MARGIN = 1.5;
     const isYes = forecast >= data.targetTemperature;
-    const direction = isYes ? 'YES' : 'NO';
-    const tokenId = isYes ? market.yesTokenId : market.noTokenId;
+    const diff = Math.round(Math.abs(forecast - data.targetTemperature) * 10) / 10;
+    
+    let direction;
+    let shares = 0;
+    let strategyLevel = "";
 
-    logger.success(`WEATHER: Trade signal generated! Suggesting ${direction} for ${market.question}`);
+    if (forecast > data.targetTemperature + ERROR_MARGIN) {
+        direction = 'YES';
+        strategyLevel = 'HIGH CONFIDENCE';
+        shares = 30; // Max sizing
+    } else if (forecast >= data.targetTemperature) {
+        direction = 'YES';
+        strategyLevel = 'HEDGED (Inside Error Margin)';
+        shares = 10; // Scaled down sizing
+    } else if (forecast < data.targetTemperature - ERROR_MARGIN) {
+        direction = 'NO';
+        strategyLevel = 'HIGH CONFIDENCE';
+        shares = 30; // Max sizing
+    } else {
+        direction = 'NO';
+        strategyLevel = 'HEDGED (Inside Error Margin)';
+        shares = 10; // Scaled down sizing
+    }
+
+    logger.success(`WEATHER: Trade signal! Suggesting ${shares} shs of ${direction} for ${market.question} [${strategyLevel} - Diff: ${diff}F]`);
     
     const tradeParams = {
         city: data.city,
         targetTemp: data.targetTemperature,
         direction,
-        price: 0.50, // Mock price for execution
-        reason: `Forecast ${forecast}F`
+        price: 0.50, // Mock dynamic oracle price
+        reason: `${forecast}F (${strategyLevel})`
     };
 
     weatherStats.trades.push(tradeParams);
@@ -121,7 +147,7 @@ async function handleNewWeatherMarket(market) {
     if (!config.dryRun) {
         logger.warn(`WEATHER: LIVE mode not fully implemented for USDC execution yet.`);
     } else {
-        logger.info(`WEATHER: [SIM] Bought 10 shares of ${direction} for ${market.question}`);
+        logger.info(`WEATHER: [SIM] Bought ${shares} shares of ${direction} for ${market.question}`);
     }
 }
 
