@@ -41,7 +41,7 @@
     "cmm:combined:paper": "CMM_TIMEFRAMES=4h,15m CMM_ASSETS=btc CMM_SPREAD=0.02 CMM_SHARES=20 DRY_RUN=true node src/cryptoMM.js",
     "sports-ou": "cross-env DRY_RUN=false node src/sportsOU.js",
     "sports-ou-sim": "cross-env DRY_RUN=true node src/sportsOU.js",
-"stale-sniper": "cross-env DRY_RUN=false node src/staleSniper.js",
+    "stale-sniper": "cross-env DRY_RUN=false node src/staleSniper.js",
     "stale-sniper-sim": "cross-env DRY_RUN=true node src/staleSniper.js",
     "cmm-analysis": "node scripts/cmm-analysis.js",
     "test": "node test/kelly.test.js && node test/lp-scoring.test.js && node test/feeSchedule.test.js && node test/cmm-analysis.test.js"
@@ -60,6 +60,7 @@
     "dotenv": "^16.4.7",
     "ethers": "^5.8.0",
     "express": "^5.2.1",
+    "onnxruntime-web": "^1.24.3",
     "ws": "^8.19.0"
   },
   "devDependencies": {

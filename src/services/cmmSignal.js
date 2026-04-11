@@ -145,7 +145,7 @@ const SIGNAL_FEATURE_COLS = [
 
 export async function loadSignalModels() {
     try {
-        _ort = await import('onnxruntime-node');
+        _ort = await import('onnxruntime-web');
         const modelsDir = path.join(__dirname, '..', '..', 'models');
         for (const asset of ['btc', 'eth', 'sol']) {
             const modelPath = path.join(modelsDir, `${asset}_signal.onnx`);
@@ -162,7 +162,7 @@ export async function loadSignalModels() {
             }
         }
     } catch {
-        logger.info('CMM: onnxruntime-node not available — signal filter disabled (fail-open)');
+        logger.info('CMM: onnxruntime-web not available — signal filter disabled (fail-open)');
     }
 }
 
