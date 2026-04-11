@@ -82,6 +82,7 @@ export async function scanForTargets(opts = {}) {
         maxMarkets = 8,
         maxSpreadFilter = 0,      // 0 = disabled — let liquidity score rank instead
         minVolume = 0,            // 0 = disabled — let liquidity score rank instead
+        blocklist = [],           // slugs to exclude (confirmed non-earners)
     } = opts;
 
     const markets = await fetchRewardMarkets();
@@ -90,6 +91,11 @@ export async function scanForTargets(opts = {}) {
     const candidates = [];
 
     for (const m of markets) {
+        if (blocklist.length > 0 && blocklist.includes(m.market_slug)) {
+            logger.info(`LP SCANNER: skip ${m.market_slug} (blocklisted)`);
+            continue;
+        }
+
         const dailyReward = m.rewards_config?.[0]?.rate_per_day || 0;
         if (dailyReward < minDailyReward) continue;
 

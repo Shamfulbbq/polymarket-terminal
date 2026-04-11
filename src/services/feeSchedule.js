@@ -23,11 +23,16 @@ const STALENESS_DAYS = 30;
 // ── Hardcoded defaults (match data/feeSchedule.json) ─────────────────────────
 
 const DEFAULTS = {
-    crypto:      { C: 0.25,  exponent: 2,   rebateRate: 0.20 },
+    crypto:      { C: 0.288, exponent: 2,   rebateRate: 0.20 },
     crypto_15m:  { C: 0.288, exponent: 2,   rebateRate: 0.20 },
-    weather:     { C: 0.16,  exponent: 2,   rebateRate: 0.20 },
+    weather:     { C: 0.16,  exponent: 2,   rebateRate: 0.25 },
     sports:      { C: 0.03,  exponent: 0.5, rebateRate: 0.25 },
-    politics:    { C: 0.16,  exponent: 2,   rebateRate: 0.20 },
+    politics:    { C: 0.16,  exponent: 2,   rebateRate: 0.25 },
+    finance:     { C: 0.16,  exponent: 2,   rebateRate: 0.25 },
+    tech:        { C: 0.16,  exponent: 2,   rebateRate: 0.25 },
+    mentions:    { C: 0.24,  exponent: 2,   rebateRate: 0.25 },
+    culture:     { C: 0.16,  exponent: 2,   rebateRate: 0.25 },
+    economics:   { C: 0.24,  exponent: 2,   rebateRate: 0.25 },
     geopolitics: { C: 0.00,  exponent: 2,   rebateRate: 0.00 },
 };
 
@@ -85,6 +90,18 @@ export function checkStaleness() {
 export function computeFee(shares, price, category) {
     const params = _schedule[category] || _schedule['crypto'] || DEFAULTS['crypto'];
     return shares * params.C * Math.pow(price * (1 - price), params.exponent);
+}
+
+/**
+ * Compute fee as a fraction of price (useful for edge calculations).
+ * Returns the fee rate per share at a given price level.
+ * @param {number} price    - market price (0–1)
+ * @param {string} category - fee category
+ * @returns {number} fee per share in price units
+ */
+export function computeFeeRate(price, category) {
+    const params = _schedule[category] || _schedule['crypto'] || DEFAULTS['crypto'];
+    return params.C * Math.pow(price * (1 - price), params.exponent);
 }
 
 /**

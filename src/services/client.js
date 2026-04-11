@@ -29,7 +29,11 @@ export async function initClient() {
         logger.info('Using API credentials from .env');
     } else {
         const tempClient = new ClobClient(config.clobHost, config.chainId, signer);
-        apiCreds = await tempClient.createOrDeriveApiKey();
+        try {
+            apiCreds = await tempClient.createOrDeriveApiKey();
+        } catch {
+            apiCreds = await tempClient.deriveApiKey();
+        }
         logger.info('API credentials derived successfully');
     }
 

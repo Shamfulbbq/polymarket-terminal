@@ -106,7 +106,7 @@ export async function cancelAllFarmOrders() {
 
 // ── Post farm orders ────────────────────────────────────────────────────────
 
-export async function postFarmOrders(market) {
+export async function postFarmOrders(market, capitalUsd = 50) {
     if (isCircuitBroken()) {
         logger.warn(`FARM: circuit breaker active — skipping ${market.question?.slice(0, 40)}`);
         return;
@@ -126,7 +126,7 @@ export async function postFarmOrders(market) {
     const maxSpread = market.maxSpread || 0.05;
     const tickSize = market.tickSize || '0.01';
     const tick = parseFloat(tickSize) || 0.01;
-    const shares = market.minSize || 20;
+    const minShares = market.minSize || 20;
     const label = (market.question || '').slice(0, 35);
 
     let yesBidId = null;
@@ -141,6 +141,9 @@ export async function postFarmOrders(market) {
 
         // Outer edge of reward zone: mid - maxSpread + 1 tick
         const farmBid = roundToTick(mid - maxSpread + tick, tickSize);
+
+        // Size: target capitalUsd per side, floored at market's minimum
+        const shares = Math.max(minShares, Math.floor(capitalUsd / Math.max(farmBid, 0.01)));
 
         // Safety: don't post if bestAsk is too close
         if (farmBid > 0.01 && farmBid < 0.99 && yesBook.bestAsk > farmBid + SAFETY_BUFFER) {
@@ -165,6 +168,9 @@ export async function postFarmOrders(market) {
             : (noBook.midpoint || 0.5);
 
         const farmBid = roundToTick(mid - maxSpread + tick, tickSize);
+
+        // Size: target capitalUsd per side, floored at market's minimum
+        const shares = Math.max(minShares, Math.floor(capitalUsd / Math.max(farmBid, 0.01)));
 
         if (farmBid > 0.01 && farmBid < 0.99 && noBook.bestAsk > farmBid + SAFETY_BUFFER) {
             noBidId = await placeFarmOrder(market, market.noTokenId, farmBid, shares, `NO ${label}`);
@@ -213,12 +219,12 @@ async function placeFarmOrder(market, tokenId, price, shares, label) {
 
 // ── Refresh all ─────────────────────────────────────────────────────────────
 
-export async function refreshAllFarmOrders(markets) {
+export async function refreshAllFarmOrders(markets, capitalUsd = 50) {
     _refreshCount++;
 
     for (const market of markets) {
         try {
-            await postFarmOrders(market);
+            await postFarmOrders(market, capitalUsd);
         } catch (err) {
             logger.warn(`FARM: error on ${market.question?.slice(0, 30)} — ${err.message}`);
         }

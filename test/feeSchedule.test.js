@@ -44,15 +44,15 @@ assert('weather category exists', 'weather' in schedule, true);
 assert('geopolitics category exists', 'geopolitics' in schedule, true);
 
 // ── computeFee: crypto at p=0.50 (peak) ─────────────────────────────────────
-// fee = 1 * 0.25 * (0.50 * 0.50)^2 = 0.25 * 0.0625 = 0.015625
-assertClose('crypto fee at p=0.50 (1 share)', computeFee(1, 0.50, 'crypto'), 0.015625);
+// fee = 1 * 0.288 * (0.50 * 0.50)^2 = 0.288 * 0.0625 = 0.018
+assertClose('crypto fee at p=0.50 (1 share)', computeFee(1, 0.50, 'crypto'), 0.018);
 
-// 20 shares at p=0.50: fee = 20 * 0.015625 = 0.3125
-assertClose('crypto fee at p=0.50 (20 shares)', computeFee(20, 0.50, 'crypto'), 0.3125);
+// 20 shares at p=0.50: fee = 20 * 0.018 = 0.36
+assertClose('crypto fee at p=0.50 (20 shares)', computeFee(20, 0.50, 'crypto'), 0.36);
 
 // ── computeFee: crypto at p=0.30 ────────────────────────────────────────────
-// fee = 1 * 0.25 * (0.30 * 0.70)^2 = 0.25 * 0.0441 = 0.011025
-assertClose('crypto fee at p=0.30', computeFee(1, 0.30, 'crypto'), 0.011025);
+// fee = 1 * 0.288 * (0.30 * 0.70)^2 = 0.288 * 0.0441 = 0.0127008
+assertClose('crypto fee at p=0.30', computeFee(1, 0.30, 'crypto'), 0.0127008);
 
 // ── computeFee: weather at p=0.50 (peak) ────────────────────────────────────
 // fee = 1 * 0.16 * (0.50 * 0.50)^2 = 0.16 * 0.0625 = 0.01
@@ -69,7 +69,7 @@ assertClose('geopolitics fee at p=0.30', computeFee(100, 0.30, 'geopolitics'), 0
 // ── computeFee: boundary prices ─────────────────────────────────────────────
 assertClose('fee at p=0 is 0', computeFee(1, 0, 'crypto'), 0);
 assertClose('fee at p=1 is 0', computeFee(1, 1, 'crypto'), 0);
-assertClose('fee at p=0.99 near-zero', computeFee(1, 0.99, 'crypto'), 0.25 * Math.pow(0.99 * 0.01, 2));
+assertClose('fee at p=0.99 near-zero', computeFee(1, 0.99, 'crypto'), 0.288 * Math.pow(0.99 * 0.01, 2));
 
 // ── computeFee: 0 shares ────────────────────────────────────────────────────
 assertClose('fee with 0 shares is 0', computeFee(0, 0.50, 'crypto'), 0);
@@ -91,17 +91,17 @@ assertClose('geopolitics rebate rate', getRebateRate('geopolitics'), 0.00);
 // ── getRebateRate: unknown category falls back to crypto ────────────────────
 assertClose('unknown category rebate falls back', getRebateRate('nonexistent'), 0.20);
 
-// ── Backward compatibility: crypto fee matches old hardcoded formula ─────────
-// Old formula: shares * 0.25 * Math.pow(price * (1 - price), 2)
-function oldComputeFeeShares(shares, price) {
-    return shares * 0.25 * Math.pow(price * (1 - price), 2);
+// ── Consistency: crypto fee matches formula with current C=0.288 ────────────
+// Formula: shares * C * Math.pow(price * (1 - price), exponent)
+function expectedCryptoFee(shares, price) {
+    return shares * 0.288 * Math.pow(price * (1 - price), 2);
 }
 
 const testPrices = [0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.90];
 for (const p of testPrices) {
-    const oldFee = oldComputeFeeShares(20, p);
-    const newFee = computeFee(20, p, 'crypto');
-    assertClose(`backward compat at p=${p}`, newFee, oldFee, 0.00001);
+    const expected = expectedCryptoFee(20, p);
+    const actual = computeFee(20, p, 'crypto');
+    assertClose(`formula consistency at p=${p}`, actual, expected, 0.00001);
 }
 
 // ── checkStaleness: should not crash ────────────────────────────────────────

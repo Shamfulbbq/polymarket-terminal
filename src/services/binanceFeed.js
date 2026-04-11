@@ -1,42 +1,40 @@
-/**
- * binanceFeed.js
- * Real-time BTCUSDT feed from Binance WebSocket.
- *
- * Three streams combined:
- *   1. kline_1m       — 1-minute candles (for momentum, takerBuyRatio signals)
- *   2. aggTrade       — every individual trade (for CVD — Cumulative Volume Delta)
- *   3. depth20@100ms  — top 20 orderbook levels (for OBI — Order Book Imbalance)
- */
-
 import WebSocket from 'ws';
 import logger from '../utils/logger.js';
 
-const SYMBOL = 'btcusdt';
-const WS_URL = `wss://stream.binance.com:9443/stream?streams=${SYMBOL}@kline_1m/${SYMBOL}@aggTrade/${SYMBOL}@depth20@100ms`;
-const MAX_CANDLE_BUFFER = 30;
-const MAX_FLOW_SECONDS = 600; // keep 10 minutes of tick data
+const ASSETS = ['btcusdt', 'ethusdt', 'solusdt'];
+const STREAMS = ASSETS.flatMap(s => [`${s}@kline_1m`, `${s}@aggTrade`, `${s}@depth20@100ms`]);
+const WS_URL = `wss://stream.binance.com:9443/stream?streams=${STREAMS.join('/')}`;
+const MAX_CANDLE_BUFFER = 200; // needs 200 for frac_diff_close (FFD d=0.35)
+const MAX_FLOW_SECONDS = 600;
 const RECONNECT_DELAY_MS = 5000;
 
 let ws = null;
 let running = false;
-const candles = [];
-let lastPrice = null;
-let lastCandleTime = null;
 let connectionStatus = 'disconnected';
 
-// ── Order flow state ─────────────────────────────────────────────────────────
+// ── Per-asset state ─────────────────────────────────────────────────────────
 
-const aggTrades = [];  // { ts, price, size, isBuy }
-let cvdTotal = 0;
+const _candles    = new Map(); // symbol -> candle[]
+const _aggTrades  = new Map(); // symbol -> trade[]
+const _cvdTotal   = new Map(); // symbol -> number
+const _obi        = new Map(); // symbol -> { current, bidVol, askVol, snapshots[] }
+const _priceCache = new Map(); // symbol -> { price, updatedAt }
+const _lastCandleTime = new Map(); // symbol -> ISO string
 
-// Latest depth snapshot
-let currentObi = 0;
-let bidVolume = 0;
-let askVolume = 0;
-const obiSnapshots = []; // { ts, obi, bidVol, askVol }
-const MAX_OBI_SNAPSHOTS = 600; // ~60s at 100ms intervals
+for (const s of ASSETS) {
+    _candles.set(s, []);
+    _aggTrades.set(s, []);
+    _cvdTotal.set(s, 0);
+    _obi.set(s, { current: 0, bidVol: 0, askVol: 0, snapshots: [] });
+}
 
-// ── Parsers ──────────────────────────────────────────────────────────────────
+const MAX_OBI_SNAPSHOTS = 600;
+
+function _symbol(stream) {
+    return stream.split('@')[0];
+}
+
+// ── Parsers ─────────────────────────────────────────────────────────────────
 
 function parseKline(k) {
     return {
@@ -54,53 +52,64 @@ function parseKline(k) {
     };
 }
 
-function handleKline(data) {
+function handleKline(data, stream) {
     const k = data.k;
-    lastPrice = parseFloat(k.c);
+    const price = parseFloat(k.c);
+    const sym = _symbol(stream);
+    _priceCache.set(sym, { price, updatedAt: Date.now() });
+
     if (k.x) {
-        const candle = parseKline(k);
-        candles.push(candle);
-        if (candles.length > MAX_CANDLE_BUFFER) candles.shift();
-        lastCandleTime = new Date(candle.closeTime).toISOString();
+        const buf = _candles.get(sym);
+        if (buf) {
+            buf.push(parseKline(k));
+            if (buf.length > MAX_CANDLE_BUFFER) buf.shift();
+            _lastCandleTime.set(sym, new Date(k.T).toISOString());
+        }
     }
 }
 
-function handleAggTrade(data) {
-    const isBuy = !data.m; // m=true means maker is seller → taker is buyer
+function handleAggTrade(data, stream) {
+    const sym = _symbol(stream);
+    const isBuy = !data.m;
     const size = parseFloat(data.q);
     const price = parseFloat(data.p);
     const ts = data.T || Date.now();
 
-    aggTrades.push({ ts, price, size, isBuy });
-    cvdTotal += isBuy ? size : -size;
-    lastPrice = price;
+    _priceCache.set(sym, { price, updatedAt: Date.now() });
 
-    // Trim old ticks
+    const trades = _aggTrades.get(sym);
+    if (!trades) return;
+    trades.push({ ts, price, size, isBuy });
+    _cvdTotal.set(sym, (_cvdTotal.get(sym) || 0) + (isBuy ? size : -size));
+
     const cutoff = Date.now() - MAX_FLOW_SECONDS * 1000;
-    while (aggTrades.length > 0 && aggTrades[0].ts < cutoff) {
-        const old = aggTrades.shift();
-        cvdTotal -= old.isBuy ? old.size : -old.size;
+    while (trades.length > 0 && trades[0].ts < cutoff) {
+        const old = trades.shift();
+        _cvdTotal.set(sym, (_cvdTotal.get(sym) || 0) - (old.isBuy ? old.size : -old.size));
     }
 }
 
-function handleDepth(data) {
+function handleDepth(data, stream) {
+    const sym = _symbol(stream);
+    const state = _obi.get(sym);
+    if (!state) return;
+
     const bids = data.bids || [];
     const asks = data.asks || [];
+    let bidVol = 0, askVol = 0;
+    for (const [, qty] of bids) bidVol += parseFloat(qty);
+    for (const [, qty] of asks) askVol += parseFloat(qty);
 
-    bidVolume = 0;
-    askVolume = 0;
-    for (const [, qty] of bids) bidVolume += parseFloat(qty);
-    for (const [, qty] of asks) askVolume += parseFloat(qty);
+    const total = bidVol + askVol;
+    state.current = total > 0 ? (bidVol - askVol) / total : 0;
+    state.bidVol = bidVol;
+    state.askVol = askVol;
 
-    const total = bidVolume + askVolume;
-    currentObi = total > 0 ? (bidVolume - askVolume) / total : 0;
-
-    const now = Date.now();
-    obiSnapshots.push({ ts: now, obi: currentObi, bidVol: bidVolume, askVol: askVolume });
-    if (obiSnapshots.length > MAX_OBI_SNAPSHOTS) obiSnapshots.shift();
+    state.snapshots.push({ ts: Date.now(), obi: state.current, bidVol, askVol });
+    if (state.snapshots.length > MAX_OBI_SNAPSHOTS) state.snapshots.shift();
 }
 
-// ── WebSocket ────────────────────────────────────────────────────────────────
+// ── WebSocket ───────────────────────────────────────────────────────────────
 
 function connect() {
     if (!running) return;
@@ -109,7 +118,7 @@ function connect() {
 
     ws.on('open', () => {
         connectionStatus = 'connected';
-        logger.info('BINANCE: WebSocket connected (kline + aggTrade + depth)');
+        logger.info(`BINANCE: WebSocket connected (${ASSETS.map(s => s.replace('usdt', '').toUpperCase()).join('/')} kline/depth/trades)`);
     });
 
     ws.on('message', (raw) => {
@@ -119,9 +128,9 @@ function connect() {
             const data = msg.data;
             if (!data) return;
 
-            if (stream.includes('kline'))    handleKline(data);
-            else if (stream.includes('aggTrade')) handleAggTrade(data);
-            else if (stream.includes('depth'))    handleDepth(data);
+            if (stream.includes('kline'))         handleKline(data, stream);
+            else if (stream.includes('aggTrade')) handleAggTrade(data, stream);
+            else if (stream.includes('depth'))    handleDepth(data, stream);
         } catch { /* ignore parse errors */ }
     });
 
@@ -139,7 +148,7 @@ function connect() {
     });
 }
 
-// ── Public API ───────────────────────────────────────────────────────────────
+// ── Public API ──────────────────────────────────────────────────────────────
 
 export function startBinanceFeed() {
     running = true;
@@ -155,29 +164,27 @@ export function stopBinanceFeed() {
     connectionStatus = 'stopped';
 }
 
-export function getCandlesSince(sinceMs) {
-    return candles.filter((c) => c.openTime >= sinceMs);
+function _toSymbol(asset) {
+    const a = String(asset || 'btc').toLowerCase();
+    return a.endsWith('usdt') ? a : `${a}usdt`;
 }
 
-/**
- * Get the N most recent candles that closed BEFORE a given timestamp.
- * Used to compute pre-market momentum before a market opens.
- */
-export function getCandlesBefore(beforeMs, count = 5) {
-    const before = candles.filter((c) => c.openTime < beforeMs);
+export function getCandlesSince(sinceMs, asset) {
+    const buf = _candles.get(_toSymbol(asset)) || [];
+    return buf.filter(c => c.openTime >= sinceMs);
+}
+
+export function getCandlesBefore(beforeMs, count = 5, asset) {
+    const buf = _candles.get(_toSymbol(asset)) || [];
+    const before = buf.filter(c => c.openTime < beforeMs);
     return before.slice(-count);
 }
 
-/**
- * Fetch the latest BTC perpetual futures funding rate from Binance.
- * Negative funding = shorts paying longs = UP bias (shorts squeezed).
- * Positive funding = longs paying shorts = DOWN bias (longs crowded).
- * Returns null on error.
- */
-export async function getBinanceFundingRate() {
+export async function getBinanceFundingRate(asset) {
+    const sym = (asset || 'btc').toUpperCase() + 'USDT';
     try {
         const resp = await fetch(
-            'https://fapi.binance.com/fapi/v1/fundingRate?symbol=BTCUSDT&limit=1',
+            `https://fapi.binance.com/fapi/v1/fundingRate?symbol=${sym}&limit=1`,
             { signal: AbortSignal.timeout(3000) },
         );
         if (!resp.ok) return null;
@@ -189,47 +196,120 @@ export async function getBinanceFundingRate() {
     }
 }
 
-/**
- * Get order flow data for a given time window.
- * @param {number} sinceMs — UTC timestamp in milliseconds
- * @returns {{ cvd, buyVol, sellVol, tradeCount, obi, obiAvg, bidVol, askVol }}
- */
-export function getOrderFlowSince(sinceMs) {
+export async function getBinanceFundingHistory(asset, limit = 20) {
+    const sym = (asset || 'btc').toUpperCase() + 'USDT';
+    try {
+        const resp = await fetch(
+            `https://fapi.binance.com/fapi/v1/fundingRate?symbol=${sym}&limit=${limit}`,
+            { signal: AbortSignal.timeout(3000) },
+        );
+        if (!resp.ok) return null;
+        const data = await resp.json();
+        if (!Array.isArray(data)) return null;
+        return data.map(d => parseFloat(d.fundingRate));
+    } catch {
+        return null;
+    }
+}
+
+export async function getBinanceLongShortRatio(asset) {
+    const sym = (asset || 'btc').toUpperCase() + 'USDT';
+    try {
+        const resp = await fetch(
+            `https://fapi.binance.com/futures/data/globalLongShortAccountRatio?symbol=${sym}&period=1h&limit=1`,
+            { signal: AbortSignal.timeout(3000) },
+        );
+        if (!resp.ok) return null;
+        const data = await resp.json();
+        if (!Array.isArray(data) || data.length === 0) return null;
+        return parseFloat(data[0].longShortRatio);
+    } catch {
+        return null;
+    }
+}
+
+export function getAllCandles(asset) {
+    return _candles.get(_toSymbol(asset)) || [];
+}
+
+export function getOrderFlowSince(sinceMs, asset) {
+    const sym = _toSymbol(asset);
+    const trades = _aggTrades.get(sym) || [];
+    const state = _obi.get(sym) || { current: 0, bidVol: 0, askVol: 0, snapshots: [] };
+
     let buyVol = 0, sellVol = 0, count = 0;
-    for (const t of aggTrades) {
+    for (const t of trades) {
         if (t.ts < sinceMs) continue;
         count++;
         if (t.isBuy) buyVol += t.size;
         else sellVol += t.size;
     }
-    const cvd = buyVol - sellVol;
 
-    // Average OBI over the window
-    const relevantObi = obiSnapshots.filter(s => s.ts >= sinceMs);
+    const relevantObi = state.snapshots.filter(s => s.ts >= sinceMs);
     const obiAvg = relevantObi.length > 0
         ? relevantObi.reduce((sum, s) => sum + s.obi, 0) / relevantObi.length
-        : currentObi;
+        : state.current;
 
     return {
-        cvd,
+        cvd: buyVol - sellVol,
         buyVol,
         sellVol,
         tradeCount: count,
-        obi: currentObi,
+        obi: state.current,
         obiAvg,
-        bidVol: bidVolume,
-        askVol: askVolume,
+        bidVol: state.bidVol,
+        askVol: state.askVol,
     };
 }
 
+export function getLastPrice(symbol) {
+    const ticker = `${symbol.toLowerCase()}usdt`;
+    return _priceCache.get(ticker) || null;
+}
+
 export function getBinanceFeedStatus() {
+    const btc = _priceCache.get('btcusdt');
     return {
         status: connectionStatus,
-        lastPrice,
-        lastCandleTime,
-        bufferedCandles: candles.length,
-        aggTradeCount: aggTrades.length,
-        cvd: Math.round(cvdTotal * 1000) / 1000,
-        obi: Math.round(currentObi * 1000) / 1000,
+        lastPrice: btc?.price ?? null,
+        lastCandleTime: _lastCandleTime.get('btcusdt') ?? null,
+        bufferedCandles: (_candles.get('btcusdt') || []).length,
+        aggTradeCount: (_aggTrades.get('btcusdt') || []).length,
+        cvd: Math.round((_cvdTotal.get('btcusdt') || 0) * 1000) / 1000,
+        obi: Math.round((_obi.get('btcusdt')?.current || 0) * 1000) / 1000,
     };
+}
+
+// ── Per-asset staleness detection ───────────────────────────────────────────
+
+const STALENESS_THRESHOLD_MS = 120_000; // 2 minutes without data = stale
+
+/**
+ * Check feed staleness for a specific asset.
+ * Returns { stale, lastUpdateMs, staleDurationMs } or { stale: false }.
+ */
+export function checkFeedStaleness(asset) {
+    const ticker = `${asset.toLowerCase()}usdt`;
+    const cached = _priceCache.get(ticker);
+    if (!cached || !cached.updatedAt) {
+        return { stale: true, lastUpdateMs: null, staleDurationMs: null, reason: 'no_data' };
+    }
+    const ageMs = Date.now() - cached.updatedAt;
+    if (ageMs > STALENESS_THRESHOLD_MS) {
+        return { stale: true, lastUpdateMs: cached.updatedAt, staleDurationMs: ageMs, reason: 'timeout' };
+    }
+    return { stale: false, lastUpdateMs: cached.updatedAt, staleDurationMs: ageMs };
+}
+
+/**
+ * Check all tracked assets for staleness.
+ * Returns Map<asset, stalenessResult>.
+ */
+export function checkAllFeedStaleness() {
+    const results = new Map();
+    for (const sym of ASSETS) {
+        const asset = sym.replace('usdt', '');
+        results.set(asset, checkFeedStaleness(asset));
+    }
+    return results;
 }

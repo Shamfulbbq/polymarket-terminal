@@ -1,91 +1,39 @@
 /**
  * cryptoMMExecutor.js
- * Core executor for the crypto market maker bot.
- * Posts two-sided quotes on Polymarket crypto markets to earn the bid-ask spread.
+ * Directional signal executor for Polymarket crypto markets.
+ * Waits for ML-gated signal, then places a single BUY on the predicted winner side.
  * Supports 5-minute, 15-minute, 1H, and 4H markets via slotDuration-derived timing.
  *
  * Timeline per market (proportional to slotDuration):
- *   T-(75%): POST neutral two-sided quotes
- *   T-(25%): CHECK directional signal -> SKEW quotes if signal fires
- *   T-10s/60s: CANCEL all orders before resolution
+ *   T-(25%): CHECK signal + ML filter -> BUY predicted winner if approved
+ *   T-10s/60s: CANCEL unfilled orders before resolution
  *   T+3min:    CHECK outcome, compute PnL
  */
 
 import { Side, OrderType } from '@polymarket/clob-client';
 import config from '../config/index.js';
 import { getClient, submitOrderTimed } from './client.js';
-import { getCandlesSince, getOrderFlowSince } from './binanceFeed.js';
-import { ALL_SIGNALS } from '../backtest/signals.js';
+import { getCandlesSince, getOrderFlowSince, getBinanceFundingRate, getBinanceFundingHistory, getBinanceLongShortRatio } from './binanceFeed.js';
 import { checkResolutionOnChain } from './ctf.js';
 import { validateOrderbook, isCircuitBroken } from '../utils/orderbookGuard.js';
 import logger from '../utils/logger.js';
 import { computeFee, getRebateRate } from './feeSchedule.js';
+import { evaluate as evaluateSignal, loadSignalModels, checkModelDegradation } from './cmmSignal.js';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
-// ── Signal quality filter (ONNX) ─────────────────────────────────────────────
-// Fail-open: if model unavailable, all signals pass through unchanged.
-let _signalModels = {}; // asset -> ort.InferenceSession
-
-async function loadSignalModels() {
-    try {
-        const ort = await import('onnxruntime-node');
-        const modelsDir = path.join(__dirname, '..', '..', 'models');
-        for (const asset of ['btc', 'eth', 'sol']) {
-            const modelPath = path.join(modelsDir, `${asset}_signal.onnx`);
-            if (fs.existsSync(modelPath)) {
-                try {
-                    _signalModels[asset] = await ort.InferenceSession.create(modelPath);
-                    logger.info(`CMM: signal model loaded for ${asset.toUpperCase()} (${modelPath})`);
-                } catch (err) {
-                    logger.warn(`CMM: failed to load ${asset} signal model — ${err.message} (fail-open)`);
-                }
-            }
-        }
-    } catch {
-        logger.info('CMM: onnxruntime-node not available — signal filter disabled (fail-open)');
-    }
-}
-
-const CMM_SIGNAL_THRESHOLD = parseFloat(process.env.CMM_SIGNAL_THRESHOLD || '0.5');
-const SIGNAL_FEATURE_COLS = [
-    'obi', 'cvd_direction', 'confidence', 'direction',
-    'slot_duration', 'yes_mid', 'price_distance', 'fill_count',
-    'asset_btc', 'asset_eth', 'asset_sol',
-    'ret_1h', 'ret_4h', 'ret_15m', 'vol_1h', 'vol_ratio',
-];
-
-function scoreSignal(asset, features) {
-    const session = _signalModels[asset.toLowerCase()];
-    if (!session) return null; // model not loaded — fail open
-
-    try {
-        const ort = require('onnxruntime-node'); // sync require after async import
-        const row = SIGNAL_FEATURE_COLS.map(k => features[k] ?? 0);
-        const tensor = new ort.Tensor('float32', Float32Array.from(row), [1, row.length]);
-        const results = session.runSync({ float_input: tensor });
-        const probs = results['output_probability']?.data ?? results[Object.keys(results)[0]]?.data;
-        return probs ? probs[1] : null; // probability of class 1 (signal correct)
-    } catch (err) {
-        logger.warn(`CMM: signal model inference error — ${err.message} (fail-open)`);
-        return null;
-    }
-}
-
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = path.join(__dirname, '..', '..', 'data');
 const LOG_FILE = path.join(DATA_DIR, 'crypto_mm.jsonl');
+const STATE_FILE = path.join(DATA_DIR, 'cmm_state.json');
 
 // ── Configuration (from environment) ────────────────────────────────────────
 
 const CMM_ASSETS = (process.env.CMM_ASSETS || 'btc,eth,sol').split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
-const CMM_SHARES = parseFloat(process.env.CMM_SHARES || '20');
-const CMM_SPREAD = parseFloat(process.env.CMM_SPREAD || '0.04');
 const CMM_SKEW_SPREAD = parseFloat(process.env.CMM_SKEW_SPREAD || '0.02');
 const CMM_MAX_DAILY_LOSS = parseFloat(process.env.CMM_MAX_DAILY_LOSS || '50');
 const CMM_SIGNAL_MINUTES = parseInt(process.env.CMM_SIGNAL_MINUTES || '3', 10);
-const CMM_SIGNAL_NAME = process.env.CMM_SIGNAL || 'momentum';
 
 const SLOT_SEC = 5 * 60; // default / fallback
 const PAPER_MODE = config.dryRun;
@@ -171,8 +119,11 @@ function resetDailyLossIfNeeded() {
         _stats.dailyRewardEstimate = 0;
         _stats.dailyFeesSaved = 0;
         _dailyLossResetDate = today;
+        saveState();
     }
 }
+
+// Signal logic (feature engineering, ML inference, sizing) moved to cmmSignal.js
 
 async function fetchOrderbook(tokenId) {
     try {
@@ -273,88 +224,22 @@ async function cancelOrder(orderId) {
     } catch { /* best effort */ }
 }
 
-// ── Core functions ──────────────────────────────────────────────────────────
+// ── Signal evaluation + entry ───────────────────────────────────────────────
 
-async function postNeutralQuotes(market) {
+async function checkSignalAndEnter(market) {
     const { conditionId, yesTokenId, noTokenId, asset } = market;
     const label = `${asset.toUpperCase()} ${(market.question || '').slice(0, 30)}`;
 
+    // Already entered this market — skip
+    if (_activeOrders.has(conditionId)) return;
+
     if (isCircuitBroken()) {
-        logger.warn(`CMM: ${label} — circuit breaker active, skipping quotes`);
+        logger.warn(`CMM: ${label} — circuit breaker active, skipping entry`);
         return;
     }
 
     if (isDailyLossHit()) {
-        logger.warn(`CMM: ${label} — daily loss limit hit, skipping quotes`);
-        return;
-    }
-
-    // Fetch orderbooks for both sides
-    const [rawYesBook, rawNoBook] = await Promise.all([
-        fetchOrderbook(yesTokenId),
-        fetchOrderbook(noTokenId),
-    ]);
-
-    const yesBook = validateOrderbook(yesTokenId, rawYesBook);
-    const noBook = validateOrderbook(noTokenId, rawNoBook);
-
-    if (!yesBook || !noBook) {
-        logger.warn(`CMM: ${label} — orderbook unavailable, skipping quotes`);
-        return;
-    }
-
-    // Calculate midpoints
-    const yesMid = (yesBook.bestBid + yesBook.bestAsk) / 2;
-    const noMid = (noBook.bestBid + noBook.bestAsk) / 2;
-    const tickSize = market.tickSize || '0.01';
-    const shares = CMM_SHARES;
-
-    // Place BID and ASK on both YES and NO at mid +/- spread
-    const yesBidPrice = yesMid - CMM_SPREAD / 2;
-    const yesAskPrice = yesMid + CMM_SPREAD / 2;
-    const noBidPrice = noMid - CMM_SPREAD / 2;
-    const noAskPrice = noMid + CMM_SPREAD / 2;
-
-    const [yesBidId, yesAskId, noBidId, noAskId] = await Promise.all([
-        placeOrder(market, yesTokenId, Side.BUY,  yesBidPrice, shares, `${label} YES BID`),
-        placeOrder(market, yesTokenId, Side.SELL, yesAskPrice, shares, `${label} YES ASK`),
-        placeOrder(market, noTokenId,  Side.BUY,  noBidPrice,  shares, `${label} NO BID`),
-        placeOrder(market, noTokenId,  Side.SELL, noAskPrice,  shares, `${label} NO ASK`),
-    ]);
-
-    _activeOrders.set(conditionId, {
-        yesBidId, yesAskId, noBidId, noAskId,
-        market,
-        fills: [],
-        yesMid, noMid,
-        postedAt: Date.now(),
-    });
-
-    _stats.marketsQuoted++;
-
-    // Estimate reward: maker orders within ~4c of mid earn rewards
-    const rewardEstPerSide = computeFeeShares(shares, yesMid) * getRebateRate('crypto');
-    _stats.dailyRewardEstimate += rewardEstPerSide * 4; // 4 orders
-
-    logger.info(
-        `CMM: ${label} | YES mid=$${yesMid.toFixed(2)} spread=${yesBook.spread.toFixed(3)} | ` +
-        `NO mid=$${noMid.toFixed(2)} spread=${noBook.spread.toFixed(3)} | ${shares}sh per side`
-    );
-
-    logAction('quote_neutral', {
-        conditionId, asset: asset.toUpperCase(),
-        yesMid, noMid, spread: CMM_SPREAD, shares,
-        yesBidId, yesAskId, noBidId, noAskId,
-    });
-}
-
-async function checkSignalAndSkew(market) {
-    const { conditionId, yesTokenId, noTokenId, asset } = market;
-    const label = `${asset.toUpperCase()} ${(market.question || '').slice(0, 30)}`;
-    const orders = _activeOrders.get(conditionId);
-
-    if (!orders) {
-        logger.info(`CMM: ${label} — no active orders to skew`);
+        logger.warn(`CMM: ${label} — daily loss limit hit, skipping entry`);
         return;
     }
 
@@ -363,7 +248,7 @@ async function checkSignalAndSkew(market) {
         ? new Date(market.eventStartTime).getTime()
         : market.slotTimestamp * 1000;
 
-    const candles = getCandlesSince(openAtMs);
+    const candles = getCandlesSince(openAtMs, asset);
 
     if (candles.length < CMM_SIGNAL_MINUTES) {
         logger.info(`CMM: ${label} — only ${candles.length} candles (need ${CMM_SIGNAL_MINUTES}), keeping neutral`);
@@ -371,94 +256,80 @@ async function checkSignalAndSkew(market) {
         return;
     }
 
-    // Run signal
-    const signalFn = ALL_SIGNALS[CMM_SIGNAL_NAME];
-    if (!signalFn) {
-        logger.warn(`CMM: unknown signal "${CMM_SIGNAL_NAME}" — keeping neutral`);
+    // Fetch orderbook for entry pricing
+    const [rawYesBook, rawNoBook] = await Promise.all([
+        fetchOrderbook(yesTokenId),
+        fetchOrderbook(noTokenId),
+    ]);
+    const yesBook = validateOrderbook(yesTokenId, rawYesBook);
+    const noBook  = validateOrderbook(noTokenId,  rawNoBook);
+    if (!yesBook || !noBook) {
+        logger.warn(`CMM: ${label} — orderbook unavailable at signal time, skipping entry`);
+        return;
+    }
+    const yesMid = (yesBook.bestBid + yesBook.bestAsk) / 2;
+    const noMid  = (noBook.bestBid  + noBook.bestAsk)  / 2;
+
+    // Fetch live Binance data for signal module (all best-effort, fail to defaults)
+    const orderFlow = getOrderFlowSince(openAtMs, asset);
+    const [fundingRate, fundingHistory, lsRatio] = await Promise.all([
+        getBinanceFundingRate(asset).catch(() => null),
+        getBinanceFundingHistory(asset, 20).catch(() => null),
+        getBinanceLongShortRatio(asset).catch(() => null),
+    ]);
+
+    // Evaluate signal (feature engineering + ML filter + sizing)
+    const signal = await evaluateSignal(asset, candles, orderFlow,
+        { fundingRate, fundingHistory, lsRatio },
+        { ...market, yesMid, noMid },
+    );
+
+    if (!signal) {
+        logAction('signal_skip', { conditionId, asset: asset.toUpperCase(), reason: 'no_signal_or_filtered' });
         return;
     }
 
-    // For 1H markets, use all available candles (not just first CMM_SIGNAL_MINUTES)
-    const slotDuration = market.slotDuration || SLOT_SEC;
-    const signalCandles = slotDuration > 300 ? candles : candles.slice(0, CMM_SIGNAL_MINUTES);
-    const orderFlow = getOrderFlowSince(openAtMs);
-    const { direction, confidence } = signalFn(signalCandles, { orderFlow });
+    const { direction, side: entrySide, shares: entryShares, modelScore, confidence, sizing } = signal;
 
-    if (!direction) {
-        logger.info(`CMM: ${label} — no signal, keeping neutral quotes`);
-        logAction('signal_neutral', { conditionId, asset: asset.toUpperCase(), confidence: confidence ?? 0 });
-        return;
-    }
+    logger.info(
+        `CMM: ${label} — signal=${direction} (${(sizing.safeConf * 100).toFixed(0)}% conf` +
+        `${modelScore !== null ? ` score=${modelScore.toFixed(3)}` : ''}) ` +
+        `tier=${sizing.tier}[${sizing.low.toFixed(2)}/${sizing.mid.toFixed(2)}/${sizing.high.toFixed(2)}] ` +
+        `mult=${sizing.mult.toFixed(2)}× → ${entryShares}sh — entering`
+    );
 
-    // ML signal quality filter (fail-open: null score = pass through)
-    const modelFeatures = {
-        obi: orderFlow.obiAvg, cvd_direction: orderFlow.cvd > 0 ? 1 : -1,
-        confidence, direction: direction === 'UP' ? 1 : -1,
-        slot_duration: slotDuration, yes_mid: orders.yesMid,
-        price_distance: Math.abs(orders.yesMid - 0.5), fill_count: 0,
-        asset_btc: asset.toLowerCase() === 'btc' ? 1 : 0,
-        asset_eth: asset.toLowerCase() === 'eth' ? 1 : 0,
-        asset_sol: asset.toLowerCase() === 'sol' ? 1 : 0,
-        ret_1h: 0, ret_4h: 0, ret_15m: 0, vol_1h: 0, vol_ratio: 1,
-    };
-    const modelScore = scoreSignal(asset, modelFeatures);
+    // Directional entry: BUY the predicted winner side only.
+    // Bid at mid - CMM_SKEW_SPREAD/2 (just inside mid; GTC, cancelled at cleanup if unfilled).
+    const entryPrice = entrySide === 'YES'
+        ? yesMid - CMM_SKEW_SPREAD / 2
+        : noMid - CMM_SKEW_SPREAD / 2;
+    const entryTokenId = entrySide === 'YES' ? yesTokenId : noTokenId;
 
-    if (modelScore !== null && modelScore < CMM_SIGNAL_THRESHOLD) {
-        logger.info(`CMM: ${label} — signal=${direction} filtered by model (score=${modelScore.toFixed(3)} < ${CMM_SIGNAL_THRESHOLD}) — keeping neutral`);
-        logAction('signal_filtered', { conditionId, asset: asset.toUpperCase(), direction, confidence, modelScore, threshold: CMM_SIGNAL_THRESHOLD });
-        return;
-    }
+    const entryOrderId = await placeOrder(market, entryTokenId, Side.BUY, entryPrice, entryShares, `${label} ${entrySide} BUY (signal ${direction})`);
+    if (!entryOrderId) return;
 
-    logger.info(`CMM: ${label} — signal=${direction} (${(confidence * 100).toFixed(0)}% conf${modelScore !== null ? ` score=${modelScore.toFixed(3)}` : ''}) — skewing quotes`);
+    _activeOrders.set(conditionId, {
+        yesBidId:  entrySide === 'YES' ? entryOrderId : null,
+        yesAskId:  null,
+        noBidId:   entrySide === 'NO'  ? entryOrderId : null,
+        noAskId:   null,
+        market, fills: [],
+        yesMid, noMid,
+        entrySide, entryPrice, entryShares,
+        postedAt: Date.now(),
+    });
 
-    // Skew logic:
-    // If UP: cancel YES ASK + NO BID (don't sell the winner, don't buy the loser)
-    //        tighten YES BID closer to mid
-    //        post NO ASK at discount
-    // If DOWN: mirror
+    _stats.marketsQuoted++;
 
-    if (direction === 'UP') {
-        // Cancel YES ASK and NO BID
-        await Promise.all([
-            cancelOrder(orders.yesAskId),
-            cancelOrder(orders.noBidId),
-        ]);
-        orders.yesAskId = null;
-        orders.noBidId = null;
-
-        // Tighten YES BID (closer to mid = more aggressive buy of predicted winner)
-        await cancelOrder(orders.yesBidId);
-        const tightYesBid = orders.yesMid - CMM_SKEW_SPREAD / 2;
-        orders.yesBidId = await placeOrder(market, yesTokenId, Side.BUY, tightYesBid, CMM_SHARES, `${label} YES BID (skew UP)`);
-
-        // Post NO ASK at discount (dump NO if held)
-        const discountNoAsk = orders.noMid - CMM_SKEW_SPREAD / 2;
-        orders.noAskId = await placeOrder(market, noTokenId, Side.SELL, discountNoAsk, CMM_SHARES, `${label} NO ASK (skew UP)`);
-    } else {
-        // DOWN signal — mirror
-        await Promise.all([
-            cancelOrder(orders.noAskId),
-            cancelOrder(orders.yesBidId),
-        ]);
-        orders.noAskId = null;
-        orders.yesBidId = null;
-
-        // Tighten NO BID
-        await cancelOrder(orders.noBidId);
-        const tightNoBid = orders.noMid - CMM_SKEW_SPREAD / 2;
-        orders.noBidId = await placeOrder(market, noTokenId, Side.BUY, tightNoBid, CMM_SHARES, `${label} NO BID (skew DOWN)`);
-
-        // Post YES ASK at discount
-        const discountYesAsk = orders.yesMid - CMM_SKEW_SPREAD / 2;
-        orders.yesAskId = await placeOrder(market, yesTokenId, Side.SELL, discountYesAsk, CMM_SHARES, `${label} YES ASK (skew DOWN)`);
-    }
-
-    logAction('signal_skew', {
+    logAction('signal_entry', {
         conditionId, asset: asset.toUpperCase(),
         direction, confidence,
         obi: orderFlow.obiAvg, cvd: orderFlow.cvd,
         slotDuration: market.slotDuration || SLOT_SEC,
-        yesMid: orders.yesMid,
+        yesMid, entrySide, entryPrice, entryShares,
+        kellyMultiplier: parseFloat(sizing.mult.toFixed(3)),
+        sizeTier: sizing.tier,
+        confBands: { low: sizing.low, mid: sizing.mid, high: sizing.high },
         ...(modelScore !== null && { modelScore: parseFloat(modelScore.toFixed(4)) }),
     });
 }
@@ -494,37 +365,42 @@ async function cleanupMarket(conditionId) {
  *        if market mid moved past our ask price → assume takers hit our ask.
  */
 async function simulatePaperFills(conditionId, orders) {
-    const { market, yesMid: originalYesMid } = orders;
+    // Directional entry: the bot only holds a single BUY order (no neutral quotes).
+    // Only count a fill if the market price has crossed the order's limit price.
+    const { market, entrySide, entryPrice, entryShares } = orders;
+    if (!entrySide || !entryPrice || !entryShares) return;
+
     const label = `${market.asset.toUpperCase()} [paper]`;
+    const orderId = orders.yesBidId || orders.noBidId || 'paper-buy';
+    const tokenId = entrySide === 'YES' ? market.yesTokenId : market.noTokenId;
 
-    const [yesBook] = await Promise.all([fetchOrderbook(market.yesTokenId)]);
-    if (!yesBook) {
-        logger.info(`CMM[PAPER]: ${label} — orderbook unavailable, no fill simulation`);
-        return;
+    // Check if market price has crossed our limit — a BUY fills when ask <= our price
+    const book = await fetchOrderbook(tokenId);
+    if (book) {
+        const bestAsk = book.bestAsk;
+        if (bestAsk > entryPrice) {
+            logger.info(`CMM[PAPER]: ${label} — BUY @ $${entryPrice.toFixed(2)} not filled (bestAsk=$${bestAsk.toFixed(2)} > limit)`);
+            logAction('paper_fill_skip', {
+                conditionId, asset: market.asset.toUpperCase(),
+                entrySide, entryPrice, bestAsk, reason: 'price_not_crossed',
+            });
+            return;
+        }
     }
+    // If orderbook unavailable, assume fill (conservative — matches old behavior)
 
-    const finalMid = (yesBook.bestBid + yesBook.bestAsk) / 2;
-    const spread = parseFloat(market.spread || CMM_SPREAD);
-    const yesBidPosted = originalYesMid - spread / 2;
-    const yesAskPosted = originalYesMid + spread / 2;
+    handleFill(conditionId, orderId, entrySide, entryPrice, entryShares, true);
+    logger.info(`CMM[PAPER]: ${label} — simulated ${entrySide} BUY fill @ $${entryPrice.toFixed(2)} x ${entryShares}sh`);
 
-    // If final mid is above our ask → takers were buying YES → they crossed our ASK
-    if (finalMid > yesAskPosted) {
-        handleFill(conditionId, orders.yesAskId || 'paper-ask', 'YES', yesAskPosted, CMM_SHARES);
-        logger.info(`CMM[PAPER]: ${label} — simulated YES ASK fill (mid ${originalYesMid.toFixed(2)}→${finalMid.toFixed(2)} crossed ask ${yesAskPosted.toFixed(2)})`);
-    }
-    // If final mid is below our bid → takers were selling YES → they crossed our BID
-    if (finalMid < yesBidPosted) {
-        handleFill(conditionId, orders.yesBidId || 'paper-bid', 'YES', yesBidPosted, CMM_SHARES);
-        logger.info(`CMM[PAPER]: ${label} — simulated YES BID fill (mid ${originalYesMid.toFixed(2)}→${finalMid.toFixed(2)} crossed bid ${yesBidPosted.toFixed(2)})`);
-    }
+    // Track cost so PnL at outcome is correct (payout - cost)
+    // Mark fill as cost-deducted to prevent double-counting in scheduleOutcomeCheck
+    _stats.dailyPnl -= entryPrice * entryShares;
+    const fills = _activeOrders.get(conditionId)?.fills;
+    if (fills?.length) fills[fills.length - 1].costDeducted = true;
 
     logAction('paper_fill_simulation', {
         conditionId, asset: market.asset.toUpperCase(),
-        originalYesMid, finalMid,
-        yesBidPosted, yesAskPosted,
-        bidFilled: finalMid < yesBidPosted,
-        askFilled: finalMid > yesAskPosted,
+        entrySide, entryPrice, entryShares,
     });
 }
 
@@ -550,30 +426,58 @@ function scheduleOutcomeCheck(market) {
         }
 
         if (!outcome) {
-            logger.warn(`CMM: ${label} — outcome unknown after 6 attempts`);
+            logger.warn(`CMM: ${label} — outcome unknown after 6 attempts, fills unresolved`);
+            const tfLabel = SLOT_DURATION_LABEL[slotDuration] || `${slotDuration}s`;
+            logAction('outcome', {
+                conditionId, asset: asset.toUpperCase(),
+                timeframe: tfLabel,
+                outcome: 'UNKNOWN', fills: fills.length, marketPnl: null,
+                dailyPnl: _stats.dailyPnl,
+            });
             _activeOrders.delete(conditionId);
+            for (const [key, entry] of _pendingMarkets) {
+                if (entry.market.conditionId === conditionId) {
+                    _pendingMarkets.delete(key);
+                    break;
+                }
+            }
             return;
         }
 
-        // Compute PnL from fills
+        // Compute PnL from fills.
+        // BUY fills with costDeducted: cost already subtracted from dailyPnl at fill time,
+        //   so only credit the payout here (don't subtract cost again).
+        // BUY fills without costDeducted: full PnL = payout - cost.
+        // SELL fills: received price upfront; owe payout if our side won.
         let marketPnl = 0;
         for (const fill of fills) {
-            const won = (fill.side === 'YES' && outcome === 'UP') || (fill.side === 'NO' && outcome === 'DOWN');
+            const sideWon = (fill.side === 'YES' && outcome === 'UP') || (fill.side === 'NO' && outcome === 'DOWN');
             const feeShares = computeFeeShares(fill.shares, fill.price);
-            const payout = won ? (fill.shares - feeShares) : 0;
-            const cost = fill.price * fill.shares;
-            const pnl = payout - cost;
+            let pnl;
+            if (fill.buy) {
+                if (fill.costDeducted) {
+                    // Cost already deducted — just credit payout
+                    pnl = sideWon ? (fill.shares - feeShares) : 0;
+                } else {
+                    // Cost not yet deducted — full PnL
+                    pnl = sideWon ? (fill.shares - feeShares - fill.price * fill.shares) : -(fill.price * fill.shares);
+                }
+                if (sideWon) _stats.wins++;
+                else _stats.losses++;
+            } else {
+                // Received price upfront; owe payout if our side won
+                pnl = fill.price * fill.shares - (sideWon ? fill.shares : 0);
+                if (!sideWon) _stats.wins++; // sold the losing side → good
+                else _stats.losses++;
+            }
             marketPnl += pnl;
-
-            if (won) _stats.wins++;
-            else _stats.losses++;
         }
 
         resetDailyLossIfNeeded();
         _stats.dailyPnl += marketPnl;
 
         const pnlStr = marketPnl >= 0 ? `+$${marketPnl.toFixed(2)}` : `-$${Math.abs(marketPnl).toFixed(2)}`;
-        const emoji = marketPnl >= 0 ? 'WIN' : 'LOSS';
+        const emoji = fills.length === 0 ? 'SKIP' : (marketPnl >= 0 ? 'WIN' : 'LOSS');
         logger.money(`CMM: ${emoji} ${label} — outcome=${outcome} fills=${fills.length} pnl=${pnlStr} | daily=$${_stats.dailyPnl.toFixed(2)}`);
 
         const tfLabel = SLOT_DURATION_LABEL[slotDuration] || `${slotDuration}s`;
@@ -585,6 +489,15 @@ function scheduleOutcomeCheck(market) {
         });
 
         _activeOrders.delete(conditionId);
+        saveState();
+
+        // Remove from pending markets to prevent memory growth
+        for (const [key, entry] of _pendingMarkets) {
+            if (entry.market.conditionId === conditionId) {
+                _pendingMarkets.delete(key);
+                break;
+            }
+        }
     }, waitMs);
 
     logger.info(`CMM: outcome check scheduled in ${Math.round(waitMs / 1000)}s for ${market.asset.toUpperCase()}`);
@@ -592,11 +505,11 @@ function scheduleOutcomeCheck(market) {
 
 // ── Fill handling ───────────────────────────────────────────────────────────
 
-export function handleFill(conditionId, orderId, side, price, shares) {
+export function handleFill(conditionId, orderId, side, price, shares, buy) {
     const orders = _activeOrders.get(conditionId);
     if (!orders) return;
 
-    orders.fills.push({ orderId, side, price, shares, ts: Date.now() });
+    orders.fills.push({ orderId, side, price, shares, buy, costDeducted: false, ts: Date.now() });
     _stats.fills++;
 
     const label = `${orders.market.asset.toUpperCase()}`;
@@ -607,31 +520,57 @@ export function handleFill(conditionId, orderId, side, price, shares) {
     logger.info(`CMM: FILL ${label} ${side} @ $${price.toFixed(2)} x ${shares}sh — fee=${fee.toFixed(3)}sh rebate=$${(fee * rebateRate).toFixed(3)}`);
 
     logAction('fill', { conditionId, asset: label, side, price, shares, orderId, fillPrice: price });
-
-    // Pre-signal cross-hedge: if fill happens before the skew window
-    const fillSlotDuration = orders.market.slotDuration || SLOT_SEC;
-    const slotEnd = orders.market.endTime
-        ? new Date(orders.market.endTime).getTime()
-        : (orders.market.slotTimestamp + fillSlotDuration) * 1000;
-    const secsLeft = (slotEnd - Date.now()) / 1000;
-
-    if (secsLeft > 60) {
-        // Cross-hedge: YES filled -> buy NO at (1 - price - 0.01)
-        const hedgePrice = roundToTick(1 - price - 0.01, orders.market.tickSize || '0.01');
-        if (hedgePrice > 0 && hedgePrice < 1) {
-            const hedgeTokenId = side === 'YES' ? orders.market.noTokenId : orders.market.yesTokenId;
-            const hedgeLabel = `${label} HEDGE ${side === 'YES' ? 'NO' : 'YES'}`;
-            placeOrder(orders.market, hedgeTokenId, Side.BUY, hedgePrice, shares, hedgeLabel).catch(err =>
-                logger.warn(`CMM: hedge failed — ${err.message}`)
-            );
-            logAction('hedge', { conditionId, asset: label, hedgeSide: side === 'YES' ? 'NO' : 'YES', hedgePrice, shares });
-        }
-    }
 }
 
 // ── Fill detection loop ─────────────────────────────────────────────────────
 
 const _processedFills = new Set(); // trade IDs already processed
+
+// ── State persistence ──────────────────────────────────────────────────────
+
+function saveState() {
+    try {
+        if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+        const state = {
+            date: new Date().toISOString().slice(0, 10),
+            stats: { ..._stats },
+            processedFills: [..._processedFills],
+            savedAt: new Date().toISOString(),
+        };
+        fs.writeFileSync(STATE_FILE, JSON.stringify(state) + '\n', 'utf-8');
+    } catch (err) {
+        logger.warn(`CMM: state save failed — ${err.message}`);
+    }
+}
+
+function loadState() {
+    try {
+        if (!fs.existsSync(STATE_FILE)) return;
+        const raw = JSON.parse(fs.readFileSync(STATE_FILE, 'utf-8'));
+        const today = new Date().toISOString().slice(0, 10);
+        if (raw.date !== today) {
+            logger.info('CMM: stale state file (different day) — starting fresh');
+            return;
+        }
+        if (raw.stats) {
+            _stats.marketsQuoted = raw.stats.marketsQuoted || 0;
+            _stats.fills = raw.stats.fills || 0;
+            _stats.wins = raw.stats.wins || 0;
+            _stats.losses = raw.stats.losses || 0;
+            _stats.dailyPnl = raw.stats.dailyPnl || 0;
+            _stats.dailyRewardEstimate = raw.stats.dailyRewardEstimate || 0;
+            _stats.dailyFeesSaved = raw.stats.dailyFeesSaved || 0;
+        }
+        if (Array.isArray(raw.processedFills)) {
+            for (const id of raw.processedFills) _processedFills.add(id);
+        }
+        logger.info(`CMM: restored state — fills=${_stats.fills} W=${_stats.wins} L=${_stats.losses} daily=$${_stats.dailyPnl.toFixed(2)} processedFills=${_processedFills.size}`);
+    } catch (err) {
+        logger.warn(`CMM: state load failed — ${err.message}`);
+    }
+}
+
+loadState();
 
 /**
  * Fetch recent trades via getTrades() and detect fills for active markets.
@@ -659,35 +598,53 @@ export async function checkFills() {
         const tradeId = trade.id || trade.trade_id;
         if (!tradeId || _processedFills.has(tradeId)) continue;
 
-        const tradeTs = trade.created_at ? new Date(trade.created_at).getTime() : 0;
+        // API returns match_time (unix seconds) not created_at (ISO)
+        const tradeTs = trade.match_time ? parseInt(trade.match_time) * 1000
+            : (trade.created_at ? new Date(trade.created_at).getTime() : 0);
         if (tradeTs < cutoffMs) continue;
 
-        const conditionId = trade.condition_id;
+        // API returns "market" field, not "condition_id"
+        const conditionId = trade.market || trade.condition_id;
         const orders = _activeOrders.get(conditionId);
         if (!orders) continue; // not an active CMM market — skip
 
+        // Find our specific maker order in the maker_orders array
+        const ourMakerOrder = Array.isArray(trade.maker_orders)
+            ? trade.maker_orders.find(mo =>
+                mo.maker_address?.toLowerCase() === CMM_MAKER_ADDRESS.toLowerCase())
+            : null;
+        if (!ourMakerOrder) continue; // we weren't a maker in this trade
+
         _processedFills.add(tradeId);
 
-        const price = parseFloat(trade.price || '0');
-        const shares = parseFloat(trade.size || '0');
+        const price = parseFloat(ourMakerOrder.price || trade.price || '0');
+        const shares = parseFloat(ourMakerOrder.matched_amount || trade.size || '0');
         if (shares <= 0) continue;
 
-        // side field is the TAKER's side. If taker BUY → they hit our ASK (we sold).
-        // If taker SELL → they hit our BID (we bought).
-        const takerBuy = (trade.side || '').toUpperCase() === 'BUY';
-        const weAreBuying = !takerBuy; // taker sold to us = we bought
+        // Our maker order's side tells us directly what we did
+        const ourSide = (ourMakerOrder.side || '').toUpperCase();
+        const weAreBuying = ourSide === 'BUY';
 
         // Determine YES vs NO by matching asset_id to the market's token IDs
-        const assetId = trade.asset_id || trade.token_id;
+        const assetId = ourMakerOrder.asset_id || trade.asset_id || trade.token_id;
         const isYes = assetId === orders.market.yesTokenId;
+        const isNo = assetId === orders.market.noTokenId;
+        if (!isYes && !isNo) {
+            logger.warn(`CMM: unknown token ID ${assetId?.slice(0, 20)}... in fill — skipping`);
+            _processedFills.delete(tradeId);
+            continue;
+        }
         const fillSide = isYes ? 'YES' : 'NO';
 
+        const makerOrderId = ourMakerOrder.order_id || trade.maker_order_id;
         logger.money(`CMM: FILL ${fillSide} ${weAreBuying ? 'BUY' : 'SELL'} ${shares}sh @ $${price.toFixed(2)}`);
-        handleFill(conditionId, trade.maker_order_id, fillSide, price, shares);
+        handleFill(conditionId, makerOrderId, fillSide, price, shares, weAreBuying);
 
         // Pessimistic daily PnL: count BUY fills as cost until outcome resolves
         if (weAreBuying) {
             _stats.dailyPnl -= price * shares;
+            const fills = _activeOrders.get(conditionId)?.fills;
+            if (fills?.length) fills[fills.length - 1].costDeducted = true;
             if (isDailyLossHit()) {
                 logger.error(`CMM: DAILY LOSS LIMIT HIT ($${_stats.dailyPnl.toFixed(2)}) — cancelling all orders`);
                 await cancelAllOrders();
@@ -695,6 +652,8 @@ export async function checkFills() {
             }
         }
     }
+
+    saveState();
 }
 
 // ── Main schedule function ──────────────────────────────────────────────────
@@ -718,42 +677,30 @@ export function scheduleMarket(market) {
 
     const now = Date.now();
     const timers = [];
-    const { quoteOffsetMs, skewOffsetMs, cleanupOffsetMs } = getSlotTimings(slotDuration);
+    const { skewOffsetMs, cleanupOffsetMs } = getSlotTimings(slotDuration);
 
-    // Post neutral quotes at T-quoteOffset
-    const quoteAtMs = slotEnd - quoteOffsetMs;
-    const quoteDelay = Math.max(0, quoteAtMs - now);
-    if (quoteDelay > 0 && quoteAtMs > now) {
+    // Check signal and enter at T-skewOffset (only action — no neutral quotes)
+    const entryAtMs = slotEnd - skewOffsetMs;
+    const entryDelay = Math.max(0, entryAtMs - now);
+    if (entryDelay > 0 && entryAtMs > now) {
         const t1 = setTimeout(() => {
-            postNeutralQuotes(market).catch(err =>
-                logger.error(`CMM: postNeutralQuotes error — ${err.message}`)
+            checkSignalAndEnter(market).catch(err =>
+                logger.error(`CMM: checkSignalAndEnter error — ${err.message}`)
             );
-        }, quoteDelay);
+        }, entryDelay);
         timers.push(t1);
     }
 
-    // Check signal and skew at T-skewOffset
-    const skewAtMs = slotEnd - skewOffsetMs;
-    const skewDelay = Math.max(0, skewAtMs - now);
-    if (skewDelay > 0 && skewAtMs > now) {
-        const t2 = setTimeout(() => {
-            checkSignalAndSkew(market).catch(err =>
-                logger.error(`CMM: checkSignalAndSkew error — ${err.message}`)
-            );
-        }, skewDelay);
-        timers.push(t2);
-    }
-
-    // Cancel all orders at T-cleanupOffset
+    // Cancel any open orders at T-cleanupOffset
     const cleanupAtMs = slotEnd - cleanupOffsetMs;
     const cleanupDelay = Math.max(0, cleanupAtMs - now);
     if (cleanupDelay > 0 && cleanupAtMs > now) {
-        const t3 = setTimeout(() => {
+        const t2 = setTimeout(() => {
             cleanupMarket(market.conditionId).catch(err =>
                 logger.error(`CMM: cleanupMarket error — ${err.message}`)
             );
         }, cleanupDelay);
-        timers.push(t3);
+        timers.push(t2);
     }
 
     _pendingMarkets.set(key, { timers, market });
@@ -761,8 +708,8 @@ export function scheduleMarket(market) {
 
     const tfLabel = SLOT_DURATION_LABEL[slotDuration] || `${slotDuration}s`;
     logger.info(
-        `CMM: ${market.asset.toUpperCase()} [${tfLabel}] scheduled — quotes in ${Math.round(quoteDelay / 1000)}s, ` +
-        `skew in ${Math.round(skewDelay / 1000)}s, cleanup in ${Math.round(cleanupDelay / 1000)}s`
+        `CMM: ${market.asset.toUpperCase()} [${tfLabel}] scheduled — signal check in ${Math.round(entryDelay / 1000)}s, ` +
+        `cleanup in ${Math.round(cleanupDelay / 1000)}s`
     );
 }
 
@@ -780,6 +727,7 @@ export function getMMStats() {
         activeMarkets: _activeOrders.size,
         pendingMarkets: _pendingMarkets.size,
         paperBalance: PAPER_MODE ? _paper.balance : null,
+        dailyLossHit: isDailyLossHit(),
     };
 }
 
@@ -810,4 +758,4 @@ export async function cancelAllOrders() {
     logger.info('CMM: all orders cancelled and timers cleared');
 }
 
-export { CMM_ASSETS, loadSignalModels };
+export { CMM_ASSETS, loadSignalModels, saveState, checkModelDegradation };

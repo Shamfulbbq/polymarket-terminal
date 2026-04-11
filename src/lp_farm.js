@@ -13,6 +13,14 @@ import { initClientWithKeys } from './services/client.js';
 import { scanForTargets } from './services/rewardScanner.js';
 import { refreshAllFarmOrders, cancelAllFarmOrders, getFarmStats } from './services/rewardFarmer.js';
 
+// Markets confirmed to not earn rewards — keep up to date
+const FARM_BLOCKLIST = [
+    'spain-snap-election-called-by-june-30-2026',
+];
+
+// Target capital per order side per market (set via FARM_CAPITAL_USD env)
+const FARM_CAPITAL_USD = parseFloat(process.env.FARM_CAPITAL_USD || '50');
+
 // ── Use tailsweep wallet ────────────────────────────────────────────────────
 
 const FARM_KEY = config.tailSweepPrivateKey;
@@ -44,6 +52,7 @@ async function rescan() {
             priceMin: 0.05,
             priceMax: 0.95,
             maxMarkets: 10,       // farm many markets at once (low capital per order)
+            blocklist: FARM_BLOCKLIST,
         });
 
         if (targetMarkets.length === 0) {
@@ -75,7 +84,7 @@ async function mainLoop() {
 
     // Refresh farm orders
     try {
-        await refreshAllFarmOrders(targetMarkets);
+        await refreshAllFarmOrders(targetMarkets, FARM_CAPITAL_USD);
     } catch (err) {
         logger.warn(`FARM: refresh error — ${err.message}`);
     }

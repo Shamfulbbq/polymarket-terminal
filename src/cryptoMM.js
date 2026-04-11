@@ -8,16 +8,20 @@
  *           npm run cmm:paper   (paper trading with $1000 virtual balance)
  */
 
-import config from './config/index.js';
+import config, { validateMMConfig } from './config/index.js';
 import logger from './utils/logger.js';
 import { initClientWithKeys } from './services/client.js';
 import { startBinanceFeed, stopBinanceFeed, getBinanceFeedStatus } from './services/binanceFeed.js';
 import { startSniperDetector, stopSniperDetector } from './services/sniperDetector.js';
 import { startTimeframeDetector, stopTimeframeDetector } from './services/cryptoTimeframeDetector.js';
-import { scheduleMarket, getMMStats, cancelAllOrders, isDailyLossHit, checkFills, CMM_ASSETS } from './services/cryptoMMExecutor.js';
-import { sendCmmReport, ENABLED as TELEGRAM_ENABLED } from './services/telegram.js';
+import { scheduleMarket, getMMStats, cancelAllOrders, isDailyLossHit, checkFills, CMM_ASSETS, loadSignalModels, saveState } from './services/cryptoMMExecutor.js';
+import { sendCmmReport, sendHeartbeat, sendModelDegradationAlert, sendFeedStalenessAlert, ENABLED as TELEGRAM_ENABLED } from './services/telegram.js';
+import { checkModelDegradation } from './services/cmmSignal.js';
+import { checkAllFeedStaleness } from './services/binanceFeed.js';
 
 // ── Validate ────────────────────────────────────────────────────────────────
+
+validateMMConfig();
 
 if (CMM_ASSETS.length === 0) {
     console.error('CMM_ASSETS is empty. Set e.g. CMM_ASSETS=btc,eth,sol in .env');
@@ -85,6 +89,7 @@ async function shutdown() {
     const stats = getMMStats();
     const dailyPnlStr = stats.dailyPnl >= 0 ? `+$${stats.dailyPnl.toFixed(2)}` : `-$${Math.abs(stats.dailyPnl).toFixed(2)}`;
     logger.info(`CMM: final stats — fills=${stats.fills} W=${stats.wins} L=${stats.losses} daily=${dailyPnlStr}`);
+    saveState();
 
     process.exit(0);
 }
@@ -94,9 +99,11 @@ process.on('SIGTERM', shutdown);
 
 // ── Start ───────────────────────────────────────────────────────────────────
 
-const CMM_TIMEFRAMES = (process.env.CMM_TIMEFRAMES || '5m').split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+const CMM_TIMEFRAMES = (process.env.CMM_TIMEFRAMES || '15m,4h').split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
 const has5m = CMM_TIMEFRAMES.includes('5m');
 const longTFs = CMM_TIMEFRAMES.filter(tf => tf !== '5m');
+
+await loadSignalModels();
 
 const mode = config.dryRun ? 'PAPER ($1000 virtual)' : 'LIVE';
 logger.info(`CMM starting — ${mode}`);
@@ -117,11 +124,13 @@ if (!config.dryRun) {
 startBinanceFeed();
 
 // 5-minute markets — only if '5m' is in CMM_TIMEFRAMES
+// CMM_5M_ASSETS controls which assets run 5m (default: btc only)
 if (has5m) {
+    const assets5m = (process.env.CMM_5M_ASSETS || 'btc').split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
     const origAssets = config.sniperAssets;
-    config.sniperAssets = [...new Set([...origAssets, ...CMM_ASSETS])];
+    config.sniperAssets = [...new Set([...origAssets, ...assets5m])];
     startSniperDetector(handleNewMarket);
-    logger.info('CMM: 5m detector started');
+    logger.info(`CMM: 5m detector started — assets: ${assets5m.join(', ').toUpperCase()}`);
 }
 
 // 1H+ markets
@@ -139,25 +148,54 @@ const fillTimer = setInterval(async () => {
 statusTimer = setInterval(logStatus, 60_000);
 logStatus();
 
-// Telegram report 3x/day at 00:00, 08:00, 16:00 UTC
+// Telegram: full report every 4h at 00/04/08/12/16/20 UTC
+//           heartbeat (alive ping) every other hour — dead-man switch
+const STATS_HOURS = new Set([0, 4, 8, 12, 16, 20]);
 if (TELEGRAM_ENABLED) {
-    function msUntilNextReport() {
+    const cmmMode = config.dryRun ? 'PAPER' : 'LIVE';
+
+    function msUntilNextHour() {
         const now = new Date();
-        const h = now.getUTCHours();
-        const nextHour = [0, 8, 16].find(t => t > h) ?? 24;
         const next = new Date(now);
-        next.setUTCHours(nextHour % 24, 0, 0, 0);
-        if (nextHour === 24) next.setUTCDate(next.getUTCDate() + 1);
+        next.setUTCMinutes(0, 0, 0);
+        next.setUTCHours(next.getUTCHours() + 1);
         return next.getTime() - now.getTime();
     }
-    function scheduleNextReport() {
+
+    function scheduleNextHourlyTick() {
         setTimeout(async () => {
-            try { await sendCmmReport(getMMStats(), CMM_TIMEFRAMES); } catch {}
-            scheduleNextReport();
-        }, msUntilNextReport());
+            const h = new Date().getUTCHours();
+            const stats = getMMStats();
+            if (STATS_HOURS.has(h)) {
+                try { await sendCmmReport(stats, CMM_TIMEFRAMES); } catch {}
+            } else {
+                try { await sendHeartbeat(stats, cmmMode); } catch {}
+            }
+
+            // ML model degradation check (every hour)
+            for (const asset of CMM_ASSETS) {
+                const deg = checkModelDegradation(asset);
+                if (deg.degraded) {
+                    logger.warn(`CMM: ML model degraded for ${asset.toUpperCase()} — ${deg.reason}`);
+                    try { await sendModelDegradationAlert(asset, deg.reason); } catch {}
+                }
+            }
+
+            // Feed staleness check (every hour)
+            const staleness = checkAllFeedStaleness();
+            for (const [asset, result] of staleness) {
+                if (result.stale) {
+                    logger.warn(`CMM: feed stale for ${asset.toUpperCase()} — ${result.reason}`);
+                    try { await sendFeedStalenessAlert(asset, result.staleDurationMs); } catch {}
+                }
+            }
+
+            scheduleNextHourlyTick();
+        }, msUntilNextHour());
     }
-    scheduleNextReport();
-    logger.info(`CMM: Telegram reports enabled — next at next 00/08/16 UTC boundary`);
+
+    scheduleNextHourlyTick();
+    logger.info(`CMM: Telegram enabled — full report at 00/04/08/12/16/20 UTC, heartbeat every other hour`);
 }
 
 logger.info('CMM: waiting for markets...');

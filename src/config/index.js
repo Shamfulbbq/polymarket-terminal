@@ -133,6 +133,25 @@ const config = {
   tailSweepPrivateKey:    process.env.TAILSWEEP_PRIVATE_KEY    || process.env.PRIVATE_KEY,
   tailSweepProxyWallet:   process.env.TAILSWEEP_PROXY_WALLET_ADDRESS || process.env.PROXY_WALLET_ADDRESS,
 
+  // ── Stale Order Sniper ──────────────────────────────────────────
+  staleSniperScanInterval:    parseInt(process.env.STALE_SNIPER_SCAN_INTERVAL || '30', 10) * 1000,
+  staleSniperMaxMarkets:      parseInt(process.env.STALE_SNIPER_MAX_MARKETS || '50', 10),
+  staleSniperOrderSize:       parseFloat(process.env.STALE_SNIPER_ORDER_SIZE || '10'),
+  staleSniperEdgeThreshold:   parseFloat(process.env.STALE_SNIPER_EDGE_THRESHOLD || '0.15'),
+  staleSniperMinNetEdge:      parseFloat(process.env.STALE_SNIPER_MIN_NET_EDGE || '0.10'),
+  staleSniperMaxPerMarket:    parseFloat(process.env.STALE_SNIPER_MAX_PER_MARKET || '50'),
+  staleSniperMaxTotal:        parseFloat(process.env.STALE_SNIPER_MAX_TOTAL || '200'),
+  staleSniperDailyLossLimit:  parseFloat(process.env.STALE_SNIPER_DAILY_LOSS_LIMIT || '100'),
+  staleSniperMinLiquidity:    parseFloat(process.env.STALE_SNIPER_MIN_LIQUIDITY || '100'),
+  staleSniperMaxSpread:       parseFloat(process.env.STALE_SNIPER_MAX_SPREAD || '0.50'),
+  staleSniperMinOrders:       parseInt(process.env.STALE_SNIPER_MIN_ORDERS || '3', 10),
+  staleSniperOrderTTL:        parseInt(process.env.STALE_SNIPER_ORDER_TTL || '300', 10) * 1000, // 5 min
+  staleSniperBaitAge:         parseInt(process.env.STALE_SNIPER_BAIT_AGE || '60', 10) * 1000,   // 60s
+  staleSniperHeartbeatHours:  parseInt(process.env.STALE_SNIPER_HEARTBEAT_HOURS || '6', 10),
+
+  // ── Weather Sniper ─────────────────────────────────────────────
+  geminiApiKey: process.env.GEMINI_API_KEY || '',
+
   // ── Favorite Bias (RN1-style) ───────────────────────────────────
   // Buy the favorite side when price is in [priceMin, priceMax]. No Pinnacle (minimal).
   favoritePriceMin:     parseFloat(process.env.FAVORITE_PRICE_MIN || '0.50'),
@@ -142,6 +161,18 @@ const config = {
   // Comma-separated keywords; event title or tag slug must match one (case-insensitive)
   favoriteKeywords: (process.env.FAVORITE_KEYWORDS || 'football,soccer,EPL,Serie A,La Liga,Ligue 1,win')
                       .split(',').map((s) => s.trim().toLowerCase()).filter(Boolean),
+
+  // ── Sports Market Maker Scanner ────────────────────────────────
+  // Signal-only: scans for MM spread opportunities on sports/esports markets.
+  // No wallet required — reads public Gamma + CLOB APIs only.
+  sportsMmTags:         (process.env.SPORTS_MM_TAGS || 'nba,nfl,mlb,nhl,soccer,football,epl,mma,ufc,tennis,csgo,valorant,league-of-legends,esports,dota-2,cs2')
+                          .split(',').map((s) => s.trim().toLowerCase()).filter(Boolean),
+  sportsMmMinSpread:    parseFloat(process.env.SPORTS_MM_MIN_SPREAD    || '0.02'),  // min overround in $ to alert
+  sportsMmMinLiquidity: parseFloat(process.env.SPORTS_MM_MIN_LIQUIDITY || '50'),    // min shares at best ask (thinner side)
+  sportsMmMinHours:     parseFloat(process.env.SPORTS_MM_MIN_HOURS     || '1'),     // min hours before resolution
+  sportsMmPollInterval: parseInt( process.env.SPORTS_MM_POLL_INTERVAL  || '60', 10) * 1000, // ms between scans
+  sportsMmMaxAlerts:    parseInt( process.env.SPORTS_MM_MAX_ALERTS     || '10', 10), // top N per scan
+  sportsMmBatchSize:    parseInt( process.env.SPORTS_MM_BATCH_SIZE     || '5',  10), // parallel orderbook fetches
 };
 
 // Validation for copy-trade bot
@@ -227,6 +258,16 @@ export function validateTailSweepConfig() {
     throw new Error('TAIL_SWEEP_SECONDS_BEFORE must be between 5 and 60');
   if (config.tailSweepAssets.length === 0)
     throw new Error('TAIL_SWEEP_ASSETS must have at least one asset');
+}
+
+// Validation for sports MM scanner (signal-only, no wallet needed)
+export function validateSportsMmConfig() {
+  if (config.sportsMmTags.length === 0)
+    throw new Error('SPORTS_MM_TAGS must have at least one tag slug.');
+  if (config.sportsMmMinSpread < 0 || config.sportsMmMinSpread > 0.5)
+    throw new Error('SPORTS_MM_MIN_SPREAD must be between 0 and 0.5');
+  if (config.sportsMmMinHours < 0)
+    throw new Error('SPORTS_MM_MIN_HOURS must be >= 0');
 }
 
 export default config;
