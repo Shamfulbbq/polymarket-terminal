@@ -93,7 +93,7 @@ const config = {
   directionalAsset:         (process.env.DIRECTIONAL_ASSET || 'btc').toLowerCase(),
   directionalSignalMinutes: parseInt(process.env.DIRECTIONAL_SIGNAL_MINUTES || '3', 10),
   directionalSignal:        process.env.DIRECTIONAL_SIGNAL || 'composite',
-  directionalEntryPrice:    parseFloat(process.env.DIRECTIONAL_ENTRY_PRICE || '0.55'),
+  directionalEntryPrice:    parseFloat(process.env.DIRECTIONAL_ENTRY_PRICE || '0.65'),
   directionalShares:        parseFloat(process.env.DIRECTIONAL_SHARES || '10'),
   directionalMinConfidence: parseFloat(process.env.DIRECTIONAL_MIN_CONFIDENCE || '0'),
   // Comma-separated UTC hours to skip (e.g. "0,3,8,12,14,15,19,22")
@@ -103,7 +103,7 @@ const config = {
 
   // V2 safety and signal config
   directionalDailyLossLimit: parseFloat(process.env.DIRECTIONAL_DAILY_LOSS_LIMIT || '50'),
-  directionalMaxEntryPrice:  parseFloat(process.env.DIRECTIONAL_MAX_ENTRY_PRICE  || '0.60'),
+  directionalMaxEntryPrice:  parseFloat(process.env.DIRECTIONAL_MAX_ENTRY_PRICE  || '0.75'),
   // Comma-separated timeframes: '15m', '1h', '4h'. 15m uses directionalDetector; others use cryptoTimeframeDetector.
   directionalTimeframes: (process.env.DIRECTIONAL_TIMEFRAMES || '15m')
                            .split(',').map(s => s.trim()).filter(Boolean),

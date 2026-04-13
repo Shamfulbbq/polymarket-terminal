@@ -199,14 +199,54 @@ export function cvdSignal(candles, opts = {}) {
 }
 
 /**
- * Order Flow Composite: combines momentum + OBI + CVD + takerBuyRatio.
- * Weights: momentum 30%, OBI 25%, CVD 25%, takerBuyRatio 20%.
- * Only signals when at least 3 of 4 indicators agree on direction.
+ * Volume Weighted Average Price (VWAP) signal.
+ * Calculates VWAP over the provided candles.
+ * If current price is above VWAP by threshold, predict UP. Otherwise DOWN.
+ *
+ * @param {Array} candles — signal window candles
+ * @param {Object} opts — { threshold: 0.02 } minimum % deviation from VWAP
+ */
+export function vwapSignal(candles, opts = {}) {
+    if (!candles || candles.length < 3) return { direction: null, confidence: 0 };
+    
+    let cumVol = 0;
+    let cumPv = 0;
+    
+    for (const c of candles) {
+        // Typical Price = (High + Low + Close) / 3
+        const typicalPrice = (c.high + c.low + c.close) / 3;
+        cumVol += c.volume;
+        cumPv += typicalPrice * c.volume;
+    }
+    
+    if (cumVol === 0) return { direction: null, confidence: 0 };
+    
+    const vwap = cumPv / cumVol;
+    const currentPrice = candles[candles.length - 1].close;
+    
+    // Difference between price and VWAP as a percentage
+    const diffPct = ((currentPrice - vwap) / vwap) * 100;
+    const threshold = opts.threshold ?? 0.02;
+
+    if (Math.abs(diffPct) < threshold) return { direction: null, confidence: 0 };
+
+    const direction = currentPrice > vwap ? 'UP' : 'DOWN';
+    // Confidence maxes out at 0.15% deviation
+    const confidence = Math.min(Math.abs(diffPct) / 0.15, 1);
+    
+    return { direction, confidence, vwap };
+}
+
+/**
+ * Order Flow Composite: combines VWAP + momentum + OBI + CVD + takerBuyRatio.
+ * Weights: VWAP 30%, momentum 20%, OBI 20%, CVD 20%, takerBuyRatio 10%.
+ * Only signals when at least 3 out of 5 indicators agree on direction.
  *
  * @param {Array} candles — signal window candles
  * @param {Object} opts — { orderFlow, ... }
  */
 export function orderFlowComposite(candles, opts = {}) {
+    const vwap  = vwapSignal(candles, opts);
     const mom   = momentum(candles, { threshold: opts.momentumThreshold ?? 0.02 });
     const taker = takerBuyRatio(candles, {
         buyThreshold: opts.buyThreshold ?? 0.52,
@@ -216,10 +256,11 @@ export function orderFlowComposite(candles, opts = {}) {
     const cvd = cvdSignal(candles, opts);
 
     const signals = [
-        { sig: mom,   weight: 0.30 },
-        { sig: obi,   weight: 0.25 },
-        { sig: cvd,   weight: 0.25 },
-        { sig: taker, weight: 0.20 },
+        { sig: vwap,  weight: 0.30 },
+        { sig: mom,   weight: 0.20 },
+        { sig: obi,   weight: 0.20 },
+        { sig: cvd,   weight: 0.20 },
+        { sig: taker, weight: 0.10 },
     ];
 
     // Count agreement
@@ -275,11 +316,11 @@ export function instantSignal(candles, opts = {}) {
 }
 
 /**
- * Pre-Momentum Composite: combines pre-market Binance momentum with post-open OBI, CVD, and funding rate.
+ * Pre-Momentum Composite: combines VWAP with pre-market Binance momentum, post-open OBI, CVD, and funding rate.
  * Key insight: BTC momentum from BEFORE the 15-min market opens predicts direction before
  * Polymarket price has time to reflect it — entering early at a lower price.
  *
- * Weights: pre-momentum 40%, OBI 25%, CVD 20%, post-open momentum 10%, funding rate 5%.
+ * Weights: VWAP 30%, pre-momentum 25%, OBI 20%, CVD 15%, post-open momentum 5%, funding rate 5%.
  * Requires majority agreement to signal.
  *
  * @param {Array} candles — post-open 1-min candles (may be empty for T+0 entry)
@@ -291,6 +332,10 @@ export function preMomentumComposite(candles, opts = {}) {
     const preCandles = opts.preCandles || [];
     const flow = opts.orderFlow;
     const fundingRate = opts.fundingRate ?? null;
+
+    // VWAP anchors on the full available context (premarket + current candles)
+    const allCandles = preCandles.concat(candles);
+    const vwapSig = vwapSignal(allCandles, opts);
 
     // Pre-market momentum direction (5 min before market opened)
     let preMomDir = null;
@@ -317,10 +362,11 @@ export function preMomentumComposite(candles, opts = {}) {
     }
 
     const votes = [
-        preMomDir ? { direction: preMomDir, confidence: preMomConf, weight: 0.40 } : null,
-        obiSig.direction ? { direction: obiSig.direction, confidence: obiSig.confidence, weight: 0.25 } : null,
-        cvdSig.direction ? { direction: cvdSig.direction, confidence: cvdSig.confidence, weight: 0.20 } : null,
-        momSig.direction ? { direction: momSig.direction, confidence: momSig.confidence, weight: 0.10 } : null,
+        vwapSig.direction ? { direction: vwapSig.direction, confidence: vwapSig.confidence, weight: 0.30 } : null,
+        preMomDir ? { direction: preMomDir, confidence: preMomConf, weight: 0.25 } : null,
+        obiSig.direction ? { direction: obiSig.direction, confidence: obiSig.confidence, weight: 0.20 } : null,
+        cvdSig.direction ? { direction: cvdSig.direction, confidence: cvdSig.confidence, weight: 0.15 } : null,
+        momSig.direction ? { direction: momSig.direction, confidence: momSig.confidence, weight: 0.05 } : null,
         fundingDir ? { direction: fundingDir, confidence: 0.5, weight: 0.05 } : null,
     ].filter(Boolean);
 
@@ -351,4 +397,5 @@ export const ALL_SIGNALS = {
     orderFlowComposite,
     instantSignal,
     preMomentumComposite,
+    vwapSignal,
 };

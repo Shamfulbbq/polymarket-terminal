@@ -219,6 +219,20 @@ async function evaluateAndTrade(market, openAtMs, signalMinutes) {
     const orderFlow = getOrderFlowSince(openAtMs);
     const { direction, confidence } = signalFn(signalCandles, { orderFlow, preCandles, fundingRate });
 
+    // Dynamic Share Sizing (Kelly Spread)
+    const minConf = Math.max(0.01, config.directionalMinConfidence > 0 ? config.directionalMinConfidence : 0.55);
+    const maxConf = 1.0;
+    const minShares = 5;
+    const maxShares = config.directionalShares || 10;
+    
+    let tradeShares = maxShares;
+    if (confidence != null) {
+        const clampedConf = Math.min(Math.max(confidence, minConf), maxConf);
+        const ratio = (maxConf > minConf) ? (clampedConf - minConf) / (maxConf - minConf) : 1;
+        tradeShares = minShares + ratio * (maxShares - minShares);
+        tradeShares = Math.round(tradeShares * 100) / 100;
+    }
+
     if (!direction) {
         logger.info(`DIRECTIONAL: no signal for "${label}" (${timeframeLabel}) — skipping`);
         logTrade(market, null, 'skipped', 'no_signal', null, null, null, orderFlow, { signalMinutes });
@@ -247,7 +261,7 @@ async function evaluateAndTrade(market, openAtMs, signalMinutes) {
         return;
     }
 
-    const cost = entryPrice * config.directionalShares;
+    const cost = entryPrice * tradeShares;
 
     // Daily loss limit check — compares live balance to session-start balance.
     // Wins that resolve back into the wallet reduce the loss meter. Only stops
@@ -275,8 +289,8 @@ async function evaluateAndTrade(market, openAtMs, signalMinutes) {
     const effectivePrice = entryPrice;
 
     if (book) {
-        const feeShares = computeFeeShares(config.directionalShares, effectivePrice);
-        const netPayout = computeNetPayout(config.directionalShares, effectivePrice);
+        const feeShares = computeFeeShares(tradeShares, effectivePrice);
+        const netPayout = computeNetPayout(tradeShares, effectivePrice);
         const netProfit = netPayout - cost;
 
         const fundingStr = fundingRate != null ? ` | funding=${fundingRate > 0 ? '+' : ''}${fundingRate.toFixed(4)}` : '';
@@ -322,13 +336,13 @@ async function evaluateAndTrade(market, openAtMs, signalMinutes) {
     }
 
     // Fee-adjusted metrics for logging
-    const feeShares = computeFeeShares(config.directionalShares, effectivePrice);
-    const netPayout = computeNetPayout(config.directionalShares, effectivePrice);
+    const feeShares = computeFeeShares(tradeShares, effectivePrice);
+    const netPayout = computeNetPayout(tradeShares, effectivePrice);
 
     if (config.dryRun) {
         const orderId = `sim-dir-${Date.now()}-${tokenId.slice(-6)}`;
         logger.money(
-            `DIRECTIONAL[SIM]: BUY ${sideName} @ $${effectivePrice} × ${config.directionalShares}sh | cost $${cost.toFixed(2)} | net payout $${netPayout.toFixed(2)} | "${label}"`
+            `DIRECTIONAL[SIM]: BUY ${sideName} @ $${effectivePrice} × ${tradeShares}sh | cost $${cost.toFixed(2)} | net payout $${netPayout.toFixed(2)} | "${label}"`
         );
         const rec = {
             asset: asset.toUpperCase(),
@@ -336,7 +350,7 @@ async function evaluateAndTrade(market, openAtMs, signalMinutes) {
             side: sideName,
             orderId,
             price: effectivePrice,
-            shares: config.directionalShares,
+            shares: tradeShares,
             cost,
             confidence,
             feeShares: Math.round(feeShares * 10000) / 10000,
@@ -344,7 +358,7 @@ async function evaluateAndTrade(market, openAtMs, signalMinutes) {
         };
         activeTrades.push(rec);
         addDailySpend(cost);
-        logTrade(market, direction, 'placed', null, orderId, confidence, book, orderFlow, { signalMinutes, fundingRate });
+        logTrade(market, direction, 'placed', null, orderId, confidence, book, orderFlow, { signalMinutes, fundingRate, tradeShares });
         return;
     }
 
@@ -355,7 +369,7 @@ async function evaluateAndTrade(market, openAtMs, signalMinutes) {
                 tokenID: tokenId,
                 side: Side.BUY,
                 price: effectivePrice,
-                size: config.directionalShares,
+                size: tradeShares,
             },
             { tickSize, negRisk },
             OrderType.GTC,
@@ -363,7 +377,7 @@ async function evaluateAndTrade(market, openAtMs, signalMinutes) {
 
         if (res?.success) {
             logger.money(
-                `DIRECTIONAL: BUY ${sideName} @ $${effectivePrice} × ${config.directionalShares}sh | ` +
+                `DIRECTIONAL: BUY ${sideName} @ $${effectivePrice} × ${tradeShares}sh | ` +
                 `net payout $${netPayout.toFixed(2)} | order ${res.orderID} | "${label}"`
             );
             activeTrades.push({
@@ -372,29 +386,29 @@ async function evaluateAndTrade(market, openAtMs, signalMinutes) {
                 side: sideName,
                 orderId: res.orderID,
                 price: effectivePrice,
-                shares: config.directionalShares,
+                shares: tradeShares,
                 cost,
                 confidence,
                 feeShares: Math.round(feeShares * 10000) / 10000,
                 potentialPayout: Math.round(netPayout * 100) / 100,
             });
             addDailySpend(cost);
-            logTrade(market, direction, 'placed', null, res.orderID, confidence, book, orderFlow, { signalMinutes, fundingRate });
+            logTrade(market, direction, 'placed', null, res.orderID, confidence, book, orderFlow, { signalMinutes, fundingRate, tradeShares });
             logBalance('directional_order', { direction, orderId: res.orderID, cost }).catch(() => {});
         } else {
             const errMsg = res?.errorMsg || res?.message || 'unknown';
             logger.warn(`DIRECTIONAL: order failed — ${errMsg}`);
-            logTrade(market, direction, 'failed', errMsg, null, confidence, book, orderFlow, { signalMinutes });
+            logTrade(market, direction, 'failed', errMsg, null, confidence, book, orderFlow, { signalMinutes, tradeShares });
         }
     } catch (err) {
         logger.error(`DIRECTIONAL: order error — ${err.message}`);
-        logTrade(market, direction, 'error', err.message, null, confidence, book, orderFlow, { signalMinutes });
+        logTrade(market, direction, 'error', err.message, null, confidence, book, orderFlow, { signalMinutes, tradeShares });
     }
 }
 
 function logTrade(market, direction, status, reason, orderId, confidence, book, flow, meta = {}) {
     const price = config.directionalEntryPrice;
-    const shares = config.directionalShares;
+    const shares = meta.tradeShares || config.directionalShares;
     const fee = computeFeeShares(shares, price);
     appendOrder({
         ts: new Date().toISOString(),
