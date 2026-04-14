@@ -14,6 +14,12 @@ import logger from '../utils/logger.js';
 const SLOT_SEC = 15 * 60; // 900 seconds
 const MIN_CURRENT_MARKET_SECONDS_LEFT = 60;
 
+// Support multiple assets from config (comma-separated DIRECTIONAL_ASSET=btc,eth)
+function getAssets() {
+    const raw = process.env.DIRECTIONAL_ASSET || 'btc';
+    return raw.split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+}
+
 let pollTimer  = null;
 let onMarketCb = null;
 const seenKeys = new Set();
@@ -27,8 +33,7 @@ function nextSlot() {
     return currentSlot() + SLOT_SEC;
 }
 
-async function fetchBySlug(slotTimestamp) {
-    const asset = config.directionalAsset;
+async function fetchBySlug(asset, slotTimestamp) {
     const slug = `${asset}-updown-15m-${slotTimestamp}`;
     try {
         const resp = await fetch(`${config.gammaHost}/markets/slug/${slug}`);
@@ -40,8 +45,7 @@ async function fetchBySlug(slotTimestamp) {
     }
 }
 
-function extractMarketData(market) {
-    const asset = config.directionalAsset;
+function extractMarketData(market, asset) {
     const conditionId = market.conditionId || market.condition_id || '';
     if (!conditionId) return null;
 
@@ -111,7 +115,7 @@ function scheduleNextMarketHandoff(data, slotTimestamp) {
     const delayMs = Math.max(0, openAtMs - Date.now());
 
     logger.success(
-        `DIRECTIONAL: BTC cached "${data.question.slice(0, 40)}" — handoff in ${Math.round(delayMs / 1000)}s`
+        `DIRECTIONAL: ${data.asset.toUpperCase()} cached "${data.question.slice(0, 40)}" — handoff in ${Math.round(delayMs / 1000)}s`
     );
 
     const timer = setTimeout(() => {
@@ -122,15 +126,14 @@ function scheduleNextMarketHandoff(data, slotTimestamp) {
     nextMarketTimers.set(key, timer);
 }
 
-async function scheduleSlot(slotTimestamp, isCurrent = false) {
-    const asset = config.directionalAsset;
+async function scheduleSlot(asset, slotTimestamp, isCurrent = false) {
     const key = `${asset}-${slotTimestamp}`;
     if (seenKeys.has(key)) return;
 
-    const market = await fetchBySlug(slotTimestamp);
+    const market = await fetchBySlug(asset, slotTimestamp);
     if (!market) return;
 
-    const data = extractMarketData(market);
+    const data = extractMarketData(market, asset);
     if (!data) {
         logger.warn(`DIRECTIONAL: skipping slot ${slotTimestamp} — missing token IDs`);
         seenKeys.add(key);
@@ -165,11 +168,15 @@ async function scheduleSlot(slotTimestamp, isCurrent = false) {
 }
 
 async function poll() {
+    const assets = getAssets();
+    const slots = [currentSlot(), nextSlot()];
+    const tasks = [];
+    for (const asset of assets) {
+        tasks.push(scheduleSlot(asset, slots[0], true));
+        tasks.push(scheduleSlot(asset, slots[1], false));
+    }
     try {
-        await Promise.all([
-            scheduleSlot(currentSlot(), true),
-            scheduleSlot(nextSlot(), false),
-        ]);
+        await Promise.all(tasks);
     } catch (err) {
         logger.error('DIRECTIONAL detector poll error:', err.message);
     }
@@ -183,10 +190,13 @@ export function startDirectionalDetector(onNewMarket) {
     poll();
     pollTimer = setInterval(poll, config.mmPollInterval);
 
+    const assets = getAssets();
     const ns = nextSlot();
     const secsUntil = ns - Math.floor(Date.now() / 1000);
-    logger.info(`DIRECTIONAL detector started — asset: BTC 15m`);
-    logger.info(`Next slot: btc-updown-15m-${ns} (opens in ${secsUntil}s)`);
+    logger.info(`DIRECTIONAL detector started — assets: ${assets.join(', ')} | 15m`);
+    for (const asset of assets) {
+        logger.info(`Next slot: ${asset}-updown-15m-${ns} (opens in ${secsUntil}s)`);
+    }
 }
 
 export function stopDirectionalDetector() {

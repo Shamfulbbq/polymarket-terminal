@@ -192,11 +192,21 @@ async function evaluateAndTrade(market, openAtMs, signalMinutes) {
     // Get candles from Binance since market open
     const candles = getCandlesSince(openAtMs);
 
-    if (signalMinutes > 0 && candles.length < signalMinutes) {
+    // Apply per-asset overrides if defined
+    const assetLower = (asset || '').toLowerCase();
+    const overrides = config.directionalAssetOverrides?.[assetLower] || {};
+    
+    const activeSignal = overrides.signal || config.directionalSignal;
+    const activeSignalMinutes = overrides.signalMinutes ?? signalMinutes;
+    const activeSharesMax = overrides.shares ?? config.directionalShares;
+    const activeEntryPrice = overrides.entryPrice ?? config.directionalEntryPrice;
+    const activeMinConfidence = overrides.minConfidence ?? config.directionalMinConfidence;
+
+    if (activeSignalMinutes > 0 && candles.length < activeSignalMinutes) {
         logger.warn(
-            `DIRECTIONAL: only ${candles.length} candles available (need ${signalMinutes}) — skipping "${label}"`
+            `DIRECTIONAL: only ${candles.length} candles available (need ${activeSignalMinutes}) for ${assetLower} — skipping "${label}"`
         );
-        logTrade(market, null, 'skipped', 'insufficient_candles', null, null, null, null, { signalMinutes });
+        logTrade(market, null, 'skipped', 'insufficient_candles', null, null, null, null, { signalMinutes: activeSignalMinutes, signal: activeSignal });
         return;
     }
 
@@ -209,21 +219,21 @@ async function evaluateAndTrade(market, openAtMs, signalMinutes) {
     );
 
     // Run signal
-    const signalFn = ALL_SIGNALS[config.directionalSignal];
+    const signalFn = ALL_SIGNALS[activeSignal];
     if (!signalFn) {
-        logger.error(`DIRECTIONAL: unknown signal "${config.directionalSignal}"`);
+        logger.error(`DIRECTIONAL: unknown signal "${activeSignal}" for asset ${assetLower}`);
         return;
     }
 
-    const signalCandles = signalMinutes > 0 ? candles.slice(0, signalMinutes) : [];
+    const signalCandles = activeSignalMinutes > 0 ? candles.slice(0, activeSignalMinutes) : [];
     const orderFlow = getOrderFlowSince(openAtMs);
     const { direction, confidence } = signalFn(signalCandles, { orderFlow, preCandles, fundingRate });
 
     // Dynamic Share Sizing (Kelly Spread)
-    const minConf = Math.max(0.01, config.directionalMinConfidence > 0 ? config.directionalMinConfidence : 0.55);
+    const minConf = activeMinConfidence > 0 ? activeMinConfidence : 0;
     const maxConf = 1.0;
-    const minShares = 5;
-    const maxShares = config.directionalShares || 10;
+    const maxShares = activeSharesMax || 10;
+    const minShares = Math.min(5, maxShares);
     
     let tradeShares = maxShares;
     if (confidence != null) {
@@ -235,15 +245,15 @@ async function evaluateAndTrade(market, openAtMs, signalMinutes) {
 
     if (!direction) {
         logger.info(`DIRECTIONAL: no signal for "${label}" (${timeframeLabel}) — skipping`);
-        logTrade(market, null, 'skipped', 'no_signal', null, null, null, orderFlow, { signalMinutes });
+        logTrade(market, null, 'skipped', 'no_signal', null, null, null, orderFlow, { signalMinutes: activeSignalMinutes, signal: activeSignal });
         return;
     }
 
-    if (config.directionalMinConfidence > 0 && confidence < config.directionalMinConfidence) {
+    if (activeMinConfidence > 0 && confidence < activeMinConfidence) {
         logger.info(
-            `DIRECTIONAL: ${direction} signal too weak (${(confidence * 100).toFixed(1)}% < ${(config.directionalMinConfidence * 100).toFixed(0)}% min) — skipping "${label}"`
+            `DIRECTIONAL: ${direction} signal too weak (${(confidence * 100).toFixed(1)}% < ${(activeMinConfidence * 100).toFixed(0)}% min) — skipping "${label}"`
         );
-        logTrade(market, direction, 'skipped', 'low_confidence', null, confidence, null, orderFlow, { signalMinutes });
+        logTrade(market, direction, 'skipped', 'low_confidence', null, confidence, null, orderFlow, { signalMinutes: activeSignalMinutes, signal: activeSignal });
         return;
     }
 
@@ -252,12 +262,12 @@ async function evaluateAndTrade(market, openAtMs, signalMinutes) {
     const sideName = direction === 'UP' ? 'UP (YES)' : 'DOWN (NO)';
 
     // Hard max entry price cap (V2 safety)
-    const entryPrice = config.directionalEntryPrice;
+    const entryPrice = activeEntryPrice;
     if (entryPrice > config.directionalMaxEntryPrice) {
         logger.warn(
             `DIRECTIONAL: entry price $${entryPrice} exceeds max cap $${config.directionalMaxEntryPrice} — skipping "${label}"`
         );
-        logTrade(market, direction, 'skipped', 'max_entry_price', null, confidence, null, orderFlow, { signalMinutes });
+        logTrade(market, direction, 'skipped', 'max_entry_price', null, confidence, null, orderFlow, { signalMinutes: activeSignalMinutes, signal: activeSignal });
         return;
     }
 
@@ -415,7 +425,7 @@ function logTrade(market, direction, status, reason, orderId, confidence, book, 
         conditionId: market.conditionId,
         asset: (market.asset || '').toUpperCase(),
         question: (market.question || '').slice(0, 200),
-        signal: config.directionalSignal,
+        signal: meta.signal || config.directionalSignal,
         signalMinutes: meta.signalMinutes ?? config.directionalSignalMinutes,
         slotDuration: market.slotDuration || 900,
         direction: direction || null,

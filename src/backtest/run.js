@@ -20,6 +20,7 @@ function parseArgs() {
         signalMinutes: [1, 3, 5, 10],
         signals: Object.keys(ALL_SIGNALS),
         refresh: false,
+        symbol: 'BTCUSDT',
     };
 
     for (let i = 0; i < args.length; i++) {
@@ -33,6 +34,10 @@ function parseArgs() {
             case '--signals':
                 opts.signals = args[++i].split(',').filter((s) => ALL_SIGNALS[s]);
                 break;
+            case '--symbol':
+                opts.symbol = args[++i].toUpperCase();
+                if (!opts.symbol.endsWith('USDT')) opts.symbol += 'USDT';
+                break;
             case '--refresh':
                 opts.refresh = true;
                 break;
@@ -41,6 +46,7 @@ function parseArgs() {
 BTC 15-Min Directional Sniper Backtester
 
 Options:
+  --symbol NAME         Asset to test: BTC, ETH, SOL (default: BTC)
   --days N              Days of history to test (default: 30)
   --signal-minutes N,N  Comma-separated signal windows to test (default: 1,3,5,10)
   --signals name,name   Comma-separated signals (default: all)
@@ -58,19 +64,19 @@ Options:
 async function main() {
     const opts = parseArgs();
 
-    console.log(`BTC 15-Min Directional Sniper Backtester`);
-    console.log(`Days: ${opts.days} | Signal windows: ${opts.signalMinutes.join(', ')} min`);
+    console.log(`BTC/ETH/SOL 15-Min Directional Sniper Backtester`);
+    console.log(`Symbol: ${opts.symbol} | Days: ${opts.days} | Signal windows: ${opts.signalMinutes.join(', ')} min`);
     console.log(`Signals: ${opts.signals.join(', ')}`);
     console.log('');
 
-    const klines = await fetchKlines(opts.days, opts.refresh);
+    const klines = await fetchKlines(opts.days, opts.refresh, opts.symbol);
 
     const result = runBacktest(klines, {
         signalMinutes: opts.signalMinutes,
         signals: opts.signals,
     });
 
-    printReport(result, { days: opts.days });
+    printReport(result, { days: opts.days, symbol: opts.symbol });
 }
 
 main().catch((err) => {

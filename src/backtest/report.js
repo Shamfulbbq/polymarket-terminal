@@ -23,12 +23,13 @@ export function printReport(backtest, opts = {}) {
     const { totalWindows, upWindows, downWindows, baseRate, results, entryPrices } = backtest;
 
     const days = opts.days || '?';
+    const symbol = (opts.symbol || 'BTCUSDT').replace('USDT', '');
     const endDate = new Date().toISOString().slice(0, 10);
     const startDate = new Date(Date.now() - days * 86_400_000).toISOString().slice(0, 10);
 
     console.log('');
     console.log('='.repeat(90));
-    console.log('  BTC 15-Min Directional Sniper Backtest');
+    console.log(`  ${symbol} 15-Min Directional Sniper Backtest`);
     console.log('='.repeat(90));
     console.log(`  Period     : ${startDate} to ${endDate} (${days} days)`);
     console.log(`  Windows    : ${totalWindows} (UP: ${upWindows}, DOWN: ${downWindows})`);

@@ -17,7 +17,6 @@ const CACHE_DIR = path.join(__dirname, '..', '..', 'data', 'backtest');
 const CACHE_FILE = path.join(CACHE_DIR, 'btc_1m_klines.json');
 
 const BINANCE_KLINES = 'https://api.binance.com/api/v3/klines';
-const SYMBOL = 'BTCUSDT';
 const INTERVAL = '1m';
 const BATCH_SIZE = 1000;
 
@@ -26,19 +25,23 @@ function sleep(ms) {
 }
 
 /**
- * Fetch 1-minute BTCUSDT klines from Binance for the given number of days.
- * Caches to disk; pass forceRefresh=true to re-download.
+ * Fetch 1-minute klines from Binance for the given symbol and number of days.
+ * Caches to disk per symbol; pass forceRefresh=true to re-download.
  *
  * @param {number} days — how many days of history to fetch
  * @param {boolean} forceRefresh — skip cache
+ * @param {string} symbol — Binance symbol e.g. 'BTCUSDT', 'ETHUSDT'
  * @returns {Array<Object>} — array of candle objects
  */
-export async function fetchKlines(days = 30, forceRefresh = false) {
+export async function fetchKlines(days = 30, forceRefresh = false, symbol = 'BTCUSDT') {
+    const symbolLower = symbol.toLowerCase().replace('usdt', '');
+    const CACHE_FILE = path.join(CACHE_DIR, `${symbolLower}_1m_klines.json`);
+
     if (!forceRefresh && fs.existsSync(CACHE_FILE)) {
         const cached = JSON.parse(fs.readFileSync(CACHE_FILE, 'utf-8'));
         const cacheDays = (cached.length * 60_000) / 86_400_000;
         if (cacheDays >= days * 0.9) {
-            console.log(`Using cached klines: ${cached.length} candles (~${cacheDays.toFixed(1)} days)`);
+            console.log(`[${symbol}] Using cached klines: ${cached.length} candles (~${cacheDays.toFixed(1)} days)`);
             return cached;
         }
     }
@@ -48,13 +51,13 @@ export async function fetchKlines(days = 30, forceRefresh = false) {
     const totalCandles = days * 24 * 60;
     const batches = Math.ceil(totalCandles / BATCH_SIZE);
 
-    console.log(`Fetching ${totalCandles} candles (${days} days) from Binance in ${batches} batches...`);
+    console.log(`[${symbol}] Fetching ${totalCandles} candles (${days} days) from Binance in ${batches} batches...`);
 
     const allCandles = [];
     let cursor = startMs;
 
     for (let i = 0; i < batches; i++) {
-        const url = `${BINANCE_KLINES}?symbol=${SYMBOL}&interval=${INTERVAL}&startTime=${cursor}&limit=${BATCH_SIZE}`;
+        const url = `${BINANCE_KLINES}?symbol=${symbol}&interval=${INTERVAL}&startTime=${cursor}&limit=${BATCH_SIZE}`;
         const resp = await fetch(url);
 
         if (!resp.ok) {
@@ -88,11 +91,11 @@ export async function fetchKlines(days = 30, forceRefresh = false) {
         await sleep(200); // respect rate limits
     }
 
-    console.log(`\nFetched ${allCandles.length} candles total.`);
+    console.log(`\n[${symbol}] Fetched ${allCandles.length} candles total.`);
 
     if (!fs.existsSync(CACHE_DIR)) fs.mkdirSync(CACHE_DIR, { recursive: true });
     fs.writeFileSync(CACHE_FILE, JSON.stringify(allCandles), 'utf-8');
-    console.log(`Cached to ${CACHE_FILE}`);
+    console.log(`[${symbol}] Cached to ${CACHE_FILE}`);
 
     return allCandles;
 }

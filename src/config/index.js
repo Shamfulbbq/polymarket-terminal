@@ -18,6 +18,22 @@ function buildAssetOverrides() {
   return overrides;
 }
 
+function buildDirectionalAssetOverrides() {
+  const overrides = {};
+  const assets = (process.env.DIRECTIONAL_ASSET || 'btc,eth').split(',').map(s => s.trim().toLowerCase());
+  for (const asset of assets) {
+    const prefix = `DIRECTIONAL_${asset.toUpperCase()}_`;
+    const o = {};
+    if (process.env[prefix + 'SIGNAL'])         o.signal         = process.env[prefix + 'SIGNAL'];
+    if (process.env[prefix + 'SIGNAL_MINUTES']) o.signalMinutes  = parseInt(process.env[prefix + 'SIGNAL_MINUTES'], 10);
+    if (process.env[prefix + 'ENTRY_PRICE'])    o.entryPrice     = parseFloat(process.env[prefix + 'ENTRY_PRICE']);
+    if (process.env[prefix + 'SHARES'])         o.shares         = parseFloat(process.env[prefix + 'SHARES']);
+    if (process.env[prefix + 'MIN_CONFIDENCE']) o.minConfidence  = parseFloat(process.env[prefix + 'MIN_CONFIDENCE']);
+    if (Object.keys(o).length > 0) overrides[asset] = o;
+  }
+  return overrides;
+}
+
 const config = {
   // Wallet
   privateKey: process.env.PRIVATE_KEY,         // EOA private key (for signing only)
@@ -109,6 +125,7 @@ const config = {
                            .split(',').map(s => s.trim()).filter(Boolean),
   // Signal window for 1H+ markets (minutes after open to wait before reading candles)
   directional1hSignalMinutes: parseInt(process.env.DIRECTIONAL_1H_SIGNAL_MINUTES || '15', 10),
+  directionalAssetOverrides: buildDirectionalAssetOverrides(),
 
   // ── Tail Sweep (5-min late-entry) ──────────────────────────────
   tailSweepAssets: (process.env.TAIL_SWEEP_ASSETS || 'btc,eth,sol')
