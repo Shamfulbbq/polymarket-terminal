@@ -1,0 +1,19 @@
+
+{
+  "name": "directional-sniper-bot",
+  "version": "2.0.0",
+  "description": "Standalone Polymarket Directional Sniper Bot",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "DRY_RUN=false node src/index.js",
+    "sim": "DRY_RUN=true node src/index.js"
+  },
+  "dependencies": {
+    "@polymarket/clob-client": "^4.7.3",
+    "ethers": "^5.8.0",
+    "blessed": "^0.1.81",
+    "dotenv": "^16.4.7",
+    "ws": "^8.19.0"
+  }
+}
