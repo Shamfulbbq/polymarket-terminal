@@ -39,8 +39,8 @@ module.exports = {
                 DIRECTIONAL_SHARES: '10',
 
                 // ── Confidence gate ───────────────────────────────────
-                // Signals below 55% are ignored entirely
-                DIRECTIONAL_MIN_CONFIDENCE: '0.55',
+                // Signals below 45% are ignored entirely (lowered from 55% after analysis)
+                DIRECTIONAL_MIN_CONFIDENCE: '0.45',
 
                 // ── Risk management ───────────────────────────────────
                 DIRECTIONAL_DAILY_LOSS_LIMIT: '50',

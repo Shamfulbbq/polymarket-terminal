@@ -333,9 +333,8 @@ export function preMomentumComposite(candles, opts = {}) {
     const flow = opts.orderFlow;
     const fundingRate = opts.fundingRate ?? null;
 
-    // VWAP anchors on the full available context (premarket + current candles)
-    const allCandles = preCandles.concat(candles);
-    const vwapSig = vwapSignal(allCandles, opts);
+    // VWAP anchors solely on post-open price action to avoid double-weighting premarket momentum
+    const vwapSig = vwapSignal(candles, opts);
 
     // Pre-market momentum direction (5 min before market opened)
     let preMomDir = null;

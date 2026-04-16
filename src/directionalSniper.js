@@ -19,6 +19,7 @@ import { startDirectionalDetector, stopDirectionalDetector } from './services/di
 import { startTimeframeDetector, stopTimeframeDetector } from './services/cryptoTimeframeDetector.js';
 import { scheduleDirectionalTrade, getActiveTrades, getPendingCount, cancelAllPending, getDailySpendTotal } from './services/directionalExecutor.js';
 import { redeemMMPositions } from './services/ctf.js';
+import { runDirectionalResolver } from './services/directionalResolver.js';
 import { initBalanceLedger, logBalance, getBalancePnl } from './utils/balanceLedger.js';
 
 // ── Validate config ────────────────────────────────────────────────────────────
@@ -148,6 +149,7 @@ async function buildStatusContent() {
 
 let refreshTimer = null;
 let redeemTimer = null;
+let resolveTimer = null;
 let balanceSnapshotTimer = null;
 
 function startRefresh() {
@@ -165,6 +167,17 @@ function startRedeemer() {
         config.redeemInterval,
     );
     logger.info(`Redeemer started — checking every ${config.redeemInterval / 1000}s`);
+}
+
+const RESOLVE_INTERVAL_MS = 5 * 60 * 1000;
+
+function startResolver() {
+    runDirectionalResolver().catch((err) => logger.error('Directional resolver error:', err.message));
+    resolveTimer = setInterval(
+        () => runDirectionalResolver().catch((err) => logger.error('Directional resolver error:', err.message)),
+        RESOLVE_INTERVAL_MS,
+    );
+    logger.info(`Directional resolver started — checking resolutions every ${RESOLVE_INTERVAL_MS / 1000}s`);
 }
 
 const BALANCE_SNAPSHOT_MS = 5 * 60 * 1000;
@@ -194,6 +207,7 @@ async function shutdown() {
     cancelAllPending();
     if (refreshTimer) clearInterval(refreshTimer);
     if (redeemTimer) clearInterval(redeemTimer);
+    if (resolveTimer) clearInterval(resolveTimer);
     if (balanceSnapshotTimer) clearInterval(balanceSnapshotTimer);
     if (!config.dryRun) {
         try { await logBalance('session_end'); } catch { /* best effort */ }
@@ -214,6 +228,7 @@ logger.info(`Entry: $${config.directionalEntryPrice} × ${config.directionalShar
 startBinanceFeed();
 startRefresh();
 startRedeemer();
+startResolver();
 startBalanceSnapshots();
 
 // 15m detector (always active)
