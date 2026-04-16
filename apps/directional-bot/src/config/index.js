@@ -1,9 +1,5 @@
 import dotenv from 'dotenv';
-const result = dotenv.config();
-console.log('[DEBUG] dotenv result:', result.error ? result.error.message : 'OK');
-console.log('[DEBUG] CWD:', process.cwd());
-console.log('[DEBUG] PRIVATE_KEY exists:', !!process.env.PRIVATE_KEY);
-
+dotenv.config();
 
 // Build per-asset tailsweep overrides from env: TAIL_SWEEP_BTC_THRESHOLD, TAIL_SWEEP_ETH_MAX_PRICE, etc.
 function buildAssetOverrides() {
@@ -111,6 +107,7 @@ const config = {
 
   // ── Directional Sniper (15m BTC) ────────────────────────────────
   directionalAsset:         (process.env.DIRECTIONAL_ASSET || 'btc').toLowerCase(),
+  directionalPollInterval:  parseInt(process.env.DIRECTIONAL_POLL_INTERVAL || '15', 10) * 1000,
   directionalSignalMinutes: parseInt(process.env.DIRECTIONAL_SIGNAL_MINUTES || '3', 10),
   directionalSignal:        process.env.DIRECTIONAL_SIGNAL || 'composite',
   directionalEntryPrice:    parseFloat(process.env.DIRECTIONAL_ENTRY_PRICE || '0.65'),

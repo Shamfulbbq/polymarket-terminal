@@ -1,21 +1,17 @@
 /**
  * directionalExecutor.js
- * Waits for the signal window to elapse, reads Binance candles,
- * computes a directional signal, and places a single-side BUY order
- * on the predicted side of a BTC Polymarket market.
- *
- * V2 additions:
- *   - Daily loss limit (DIRECTIONAL_DAILY_LOSS_LIMIT, default $10)
- *   - Max entry price cap (DIRECTIONAL_MAX_ENTRY_PRICE, default $0.60)
- *   - Timeframe-aware signal timing (15m vs 1H+)
- *   - Pre-market momentum via getCandlesBefore
- *   - Funding rate fetched at signal time
  */
 
 import { Side, OrderType } from '@polymarket/clob-client';
 import config from '../config/index.js';
 import { getClient, getUsdcBalance } from './client.js';
-import { getCandlesSince, getCandlesBefore, getOrderFlowSince, getBinanceFeedStatus, getBinanceFundingRate } from './binanceFeed.js';
+import { 
+    getCandlesSince, 
+    getCandlesBefore, 
+    getOrderFlowSince, 
+    getBinanceFeedStatus, 
+    getBinanceFundingRate 
+} from './binanceFeed.js';
 import { ALL_SIGNALS } from '../backtest/signals.js';
 import { submitOrderTimed } from './client.js';
 import logger from '../utils/logger.js';
@@ -29,8 +25,6 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = path.join(__dirname, '..', '..', 'data');
 const ORDERS_FILE = path.join(DATA_DIR, 'directional_orders.jsonl');
 
-// Polymarket fee: fee_shares = shares * 0.25 * (price * (1 - price))^2
-// Max ~1.56% at price=0.50, approaches 0 near 0 or 1
 function computeFeeShares(shares, price) {
     return shares * 0.25 * Math.pow(price * (1 - price), 2);
 }
@@ -48,21 +42,14 @@ async function fetchOrderbook(tokenId) {
         });
         if (!resp.ok) return null;
         const data = await resp.json();
-
         const bids = data.bids || [];
         const asks = data.asks || [];
-
-        // bids: ascending — best bid is the last one
         const bestBid = bids.length > 0 ? parseFloat(bids[bids.length - 1].price) : 0;
-        // asks: descending — best ask (lowest) is the last one
         const bestAsk = asks.length > 0 ? parseFloat(asks[asks.length - 1].price) : 1;
         const spread = Math.round((bestAsk - bestBid) * 10000) / 10000;
         const askLiquidity = asks.reduce((sum, a) => sum + parseFloat(a.size || 0), 0);
-
         return { bestBid, bestAsk, spread, askLiquidity, bidCount: bids.length, askCount: asks.length };
-    } catch {
-        return null;
-    }
+    } catch { return null; }
 }
 
 function appendOrder(obj) {
@@ -74,104 +61,57 @@ function appendOrder(obj) {
     }
 }
 
-// ── Daily spend tracker (display only) ────────────────────────────────────────
-// Tracks cumulative trade cost placed today for dashboard display.
-// The actual loss limit uses session-start balance vs live on-chain balance.
-
-let _dailyDate = new Date().toUTCString().slice(0, 11); // e.g. "22 Mar 2026"
+// ── State ─────────────────────────────────────────────────────────────────────
+let _dailyDate = new Date().toUTCString().slice(0, 11);
 let _dailySpend = 0;
 
 function getDailySpend() {
     const today = new Date().toUTCString().slice(0, 11);
-    if (today !== _dailyDate) {
-        _dailyDate = today;
-        _dailySpend = 0;
-    }
+    if (today !== _dailyDate) { _dailyDate = today; _dailySpend = 0; }
     return _dailySpend;
 }
 
 function addDailySpend(amount) {
-    getDailySpend(); // trigger reset if new day
+    getDailySpend();
     _dailySpend += amount;
 }
 
-export function getDailySpendTotal() {
-    return getDailySpend();
-}
-
-// ── State ─────────────────────────────────────────────────────────────────────
+export function getDailySpendTotal() { return getDailySpend(); }
 
 const pendingTimers = new Map();
 const activeTrades = [];
 
-export function getActiveTrades() {
-    return [...activeTrades];
-}
-
-export function getPendingCount() {
-    return pendingTimers.size;
-}
+export function getActiveTrades() { return [...activeTrades]; }
+export function getPendingCount() { return pendingTimers.size; }
 
 // ── Scheduling ────────────────────────────────────────────────────────────────
 
-/**
- * Called when a new market is detected (15m or 1H+).
- * Schedules signal evaluation after the appropriate signal window.
- */
 export function scheduleDirectionalTrade(market) {
-    const openAtMs = market.eventStartTime
-        ? new Date(market.eventStartTime).getTime()
-        : market.slotTimestamp * 1000;
+    const openAtMs = market.eventStartTime ? new Date(market.eventStartTime).getTime() : market.slotTimestamp * 1000;
+    const slotDuration = market.slotDuration || 900;
+    const signalMinutes = slotDuration >= 3600 ? config.directional1hSignalMinutes : config.directionalSignalMinutes;
 
-    // Pick signal window based on timeframe
-    const slotDuration = market.slotDuration || 900; // seconds
-    const signalMinutes = slotDuration >= 3600
-        ? config.directional1hSignalMinutes
-        : config.directionalSignalMinutes;
+    const signalAtMs = openAtMs + signalMinutes * 60_000 + (signalMinutes > 0 ? 5000 : 1000);
+    const endAtMs = market.endTime ? new Date(market.endTime).getTime() : openAtMs + slotDuration * 1000;
 
-    // For instant signal (0 min), use a minimal buffer; otherwise add 5s for candle close
-    const CANDLE_CLOSE_BUFFER_MS = signalMinutes > 0 ? 5_000 : 1_000;
-    const signalAtMs = openAtMs + signalMinutes * 60_000 + CANDLE_CLOSE_BUFFER_MS;
+    if (signalAtMs >= endAtMs - 30_000) return;
 
-    // Check there's enough time in the market after signalling (need ≥30s to be worth placing)
-    const endAtMs = market.endTime
-        ? new Date(market.endTime).getTime()
-        : openAtMs + slotDuration * 1000;
-
-    if (signalAtMs >= endAtMs - 30_000) {
-        logger.info(
-            `DIRECTIONAL: not enough time for ${signalMinutes}min signal on "${(market.question || '').slice(0, 40)}" — skipping`
-        );
-        return;
-    }
-
-    const delayMs = Math.max(0, signalAtMs - Date.now());
-
-    // Time-of-day filter — skip UTC hours with historically negative PnL
     if (config.directionalBlockedHours.length > 0) {
         const signalHourUtc = new Date(signalAtMs).getUTCHours();
-        if (config.directionalBlockedHours.includes(signalHourUtc)) {
-            logger.info(
-                `DIRECTIONAL: skipping "${(market.question || '').slice(0, 40)}" — UTC hour ${signalHourUtc} is blocked`
-            );
-            return;
-        }
+        if (config.directionalBlockedHours.includes(signalHourUtc)) return;
     }
 
     const key = `${market.asset}-${market.slotTimestamp}`;
     if (pendingTimers.has(key)) return;
 
-    const timeframeLabel = slotDuration >= 3600 ? `${slotDuration / 3600}h` : '15m';
-    logger.info(
-        `DIRECTIONAL: scheduled ${timeframeLabel} signal for "${(market.question || '').slice(0, 40)}" in ${Math.round(delayMs / 1000)}s`
-    );
+    logger.info(`DIRECTIONAL: scheduled ${market.asset} signal in ${Math.round((signalAtMs - Date.now()) / 1000)}s`);
 
     const timer = setTimeout(() => {
         pendingTimers.delete(key);
         evaluateAndTrade(market, openAtMs, signalMinutes).catch((err) =>
             logger.error(`DIRECTIONAL: trade error — ${err.message}`)
         );
-    }, delayMs);
+    }, Math.max(0, signalAtMs - Date.now()));
 
     pendingTimers.set(key, timer);
 }
@@ -179,254 +119,129 @@ export function scheduleDirectionalTrade(market) {
 // ── Signal evaluation ─────────────────────────────────────────────────────────
 
 async function evaluateAndTrade(market, openAtMs, signalMinutes) {
-    const { conditionId, question, yesTokenId, noTokenId, tickSize, negRisk, asset, slotDuration } = market;
-    const label = (question || '').slice(0, 40);
-    const timeframeLabel = (slotDuration || 900) >= 3600 ? `${(slotDuration || 3600) / 3600}h` : '15m';
+    const { yesTokenId, noTokenId, tickSize, negRisk, asset } = market;
+    const label = (market.question || '').slice(0, 40);
 
-    // Circuit breaker check
-    if (isCircuitBroken()) {
-        logger.warn(`DIRECTIONAL: circuit breaker active — skipping "${label}"`);
-        return;
-    }
+    if (isCircuitBroken()) return;
 
-    // Get candles from Binance since market open
-    const candles = getCandlesSince(openAtMs);
-
-    // Apply per-asset overrides if defined
     const assetLower = (asset || '').toLowerCase();
     const overrides = config.directionalAssetOverrides?.[assetLower] || {};
-    
     const activeSignal = overrides.signal || config.directionalSignal;
     const activeSignalMinutes = overrides.signalMinutes ?? signalMinutes;
     const activeSharesMax = overrides.shares ?? config.directionalShares;
-    const activeEntryPrice = overrides.entryPrice ?? config.directionalEntryPrice;
+    const activeEntryPriceInitial = overrides.entryPrice ?? config.directionalEntryPrice;
     const activeMinConfidence = overrides.minConfidence ?? config.directionalMinConfidence;
 
+    const candles = getCandlesSince(assetLower, openAtMs);
+
     if (activeSignalMinutes > 0 && candles.length < activeSignalMinutes) {
-        logger.warn(
-            `DIRECTIONAL: only ${candles.length} candles available (need ${activeSignalMinutes}) for ${assetLower} — skipping "${label}"`
-        );
-        logTrade(market, null, 'skipped', 'insufficient_candles', null, null, null, null, { signalMinutes: activeSignalMinutes, signal: activeSignal });
+        logTrade(market, { direction: null, confidence: 0, signal: activeSignal, signalMinutes: activeSignalMinutes }, 'skipped', 'insufficient_candles');
         return;
     }
 
-    // Pre-market candles (5 min before open) — used by preMomentumComposite
-    const preCandles = getCandlesBefore(openAtMs, 5);
-
-    // Fetch funding rate in parallel with orderbook (best effort, non-blocking)
-    const [fundingRate] = await Promise.allSettled([getBinanceFundingRate()]).then(
+    const preCandles = getCandlesBefore(assetLower, openAtMs, 5);
+    const [fundingRate] = await Promise.allSettled([getBinanceFundingRate(assetLower)]).then(
         (results) => results.map((r) => (r.status === 'fulfilled' ? r.value : null))
     );
 
-    // Run signal
     const signalFn = ALL_SIGNALS[activeSignal];
-    if (!signalFn) {
-        logger.error(`DIRECTIONAL: unknown signal "${activeSignal}" for asset ${assetLower}`);
-        return;
-    }
+    if (!signalFn) return;
 
     const signalCandles = activeSignalMinutes > 0 ? candles.slice(0, activeSignalMinutes) : [];
-    const orderFlow = getOrderFlowSince(openAtMs);
-    const { direction, confidence, features, skipped: signalSkipped, skipReason } = signalFn(signalCandles, { orderFlow, preCandles, fundingRate });
+    const orderFlow = getOrderFlowSince(assetLower, openAtMs);
+    const { direction, confidence, features, skipped: signalSkipped, skipReason: signalSkipReason } = signalFn(signalCandles, { orderFlow, preCandles, fundingRate });
 
-    // Store for logging
     const predictionLog = {
-        direction: direction || 'UP',
+        direction: direction || null,
         confidence: confidence || 0,
         features: features || {},
         signal: activeSignal,
         signalMinutes: activeSignalMinutes
     };
 
-    // Dynamic Share Sizing (Kelly Spread)
-    const minConf = activeMinConfidence > 0 ? activeMinConfidence : 0;
-    const maxConf = 1.0;
-    const maxShares = activeSharesMax || 10;
-    const minShares = Math.min(5, maxShares);
-    
-    let tradeShares = maxShares;
-    if (confidence != null) {
-        const clampedConf = Math.min(Math.max(confidence, minConf), maxConf);
-        const ratio = (maxConf > minConf) ? (clampedConf - minConf) / (maxConf - minConf) : 1;
-        tradeShares = minShares + ratio * (maxShares - minShares);
-        tradeShares = Math.round(tradeShares * 100) / 100;
+    // 🔴 HIGH: Fix issue #1 - Explicitly respect signal skipped flag
+    if (signalSkipped) {
+        logger.info(`DIRECTIONAL: signal skipped (${signalSkipReason}) for "${label}"`);
+        logTrade(market, predictionLog, 'skipped', signalSkipReason || 'signal_skipped', null, null, orderFlow);
+        return;
     }
 
     if (!direction) {
-        logger.info(`DIRECTIONAL: no signal for "${label}" (${timeframeLabel}) — skipping`);
-        logTrade(market, predictionLog, 'skipped', 'no_signal', null, null, orderFlow);
+        logTrade(market, predictionLog, 'skipped', 'no_direction', null, null, orderFlow);
         return;
     }
 
     if (activeMinConfidence > 0 && confidence < activeMinConfidence) {
-        logger.info(
-            `DIRECTIONAL: ${direction} signal too weak (${(confidence * 100).toFixed(1)}% < ${(activeMinConfidence * 100).toFixed(0)}% min) — skipping "${label}"`
-        );
+        logger.info(`DIRECTIONAL: ${direction} too weak (${(confidence * 100).toFixed(0)}% < ${activeMinConfidence * 100}%)`);
         logTrade(market, predictionLog, 'skipped', 'low_confidence', null, null, orderFlow);
         return;
     }
 
-    // Determine which side to buy
-    const tokenId = direction === 'UP' ? yesTokenId : noTokenId;
-    const sideName = direction === 'UP' ? 'UP (YES)' : 'DOWN (NO)';
+    // Determine actual sizing
+    const maxShares = activeSharesMax || 10;
+    const minShares = Math.min(5, maxShares);
+    let tradeShares = Math.round((minShares + (confidence * (maxShares - minShares))) * 100) / 100;
 
-    // Hard max entry price cap (V2 safety)
-    const entryPrice = activeEntryPrice;
-    if (entryPrice > config.directionalMaxEntryPrice) {
-        logger.warn(
-            `DIRECTIONAL: entry price $${entryPrice} exceeds max cap $${config.directionalMaxEntryPrice} — skipping "${label}"`
-        );
-        logTrade(market, predictionLog, 'skipped', 'max_entry_price', null, null, orderFlow);
+    const effectivePrice = activeEntryPriceInitial;
+    if (effectivePrice > (config.directionalMaxEntryPrice || 0.75)) {
+        logTrade(market, predictionLog, 'skipped', 'price_too_high', null, null, orderFlow);
         return;
     }
 
-    const cost = entryPrice * tradeShares;
+    const cost = effectivePrice * tradeShares;
 
-    // Daily loss limit check — compares live balance to session-start balance.
-    // Wins that resolve back into the wallet reduce the loss meter. Only stops
-    // when we've actually lost $X net, not just spent it.
+    // Daily limit check
     const dailyLimit = config.directionalDailyLossLimit;
     if (dailyLimit > 0 && !config.dryRun) {
-        try {
-            const pnl = getBalancePnl();
-            const currentBalance = await getUsdcBalance();
-            if (pnl && currentBalance != null) {
-                const sessionLoss = pnl.sessionStartBalance - currentBalance;
-                if (sessionLoss >= dailyLimit) {
-                    logger.warn(
-                        `DIRECTIONAL: daily loss limit $${dailyLimit} reached (session loss $${sessionLoss.toFixed(2)}) — skipping "${label}"`
-                    );
-                    logTrade(market, predictionLog, 'skipped', 'daily_loss_limit', null, null, orderFlow);
-                    return;
-                }
-            }
-        } catch { /* proceed if balance check fails */ }
-    }
-
-    // Orderbook pre-check — fetch live best ask for the target token
-    const book = validateOrderbook(tokenId, await fetchOrderbook(tokenId));
-    const effectivePrice = entryPrice;
-
-    if (book) {
-        const feeShares = computeFeeShares(tradeShares, effectivePrice);
-        const netPayout = computeNetPayout(tradeShares, effectivePrice);
-        const netProfit = netPayout - cost;
-
-        const fundingStr = fundingRate != null ? ` | funding=${fundingRate > 0 ? '+' : ''}${fundingRate.toFixed(4)}` : '';
-        const preMomStr = preCandles.length >= 2
-            ? ` | pre=${preCandles.length}c(${((preCandles[preCandles.length - 1].close - preCandles[0].open) / preCandles[0].open * 100).toFixed(2)}%)`
-            : '';
-        const flowInfo = orderFlow.tradeCount > 0
-            ? ` | OBI=${orderFlow.obiAvg?.toFixed(2)} CVD=${orderFlow.cvd?.toFixed(2)} ticks=${orderFlow.tradeCount}`
-            : '';
-        logger.trade(
-            `DIRECTIONAL[${timeframeLabel}]: signal=${direction} (${(confidence * 100).toFixed(0)}% conf) for "${label}" | ` +
-            `bestAsk=$${book.bestAsk.toFixed(2)} spread=${book.spread.toFixed(3)} liq=${book.askLiquidity.toFixed(0)}sh${flowInfo}${preMomStr}${fundingStr}`
-        );
-
-        // If best ask is way above our limit, the order won't fill
-        if (book.bestAsk > effectivePrice + 0.05) {
-            logger.warn(
-                `DIRECTIONAL: best ask $${book.bestAsk.toFixed(2)} is >5c above limit $${effectivePrice} — skipping "${label}"`
-            );
-            logTrade(market, predictionLog, 'skipped', 'orderbook_unfillable', null, book, orderFlow);
+        const pnl = getBalancePnl();
+        const currentBalance = await getUsdcBalance();
+        if (pnl && currentBalance && (pnl.sessionStartBalance - currentBalance) >= dailyLimit) {
+            logTrade(market, predictionLog, 'skipped', 'daily_limit', null, null, orderFlow);
             return;
         }
-
-        logger.info(
-            `DIRECTIONAL: fee=${feeShares.toFixed(3)}sh | net payout if win=$${netPayout.toFixed(2)} | net profit=$${netProfit.toFixed(2)}`
-        );
-    } else {
-        logger.trade(
-            `DIRECTIONAL[${timeframeLabel}]: signal=${direction} (${(confidence * 100).toFixed(0)}% conf) for "${label}" | orderbook unavailable`
-        );
     }
 
-    // Balance check
-    if (!config.dryRun) {
-        try {
-            const balance = await getUsdcBalance();
-            if (balance < cost) {
-                logger.warn(`DIRECTIONAL: insufficient balance $${balance.toFixed(2)} < $${cost.toFixed(2)} — skipping`);
-                logTrade(market, predictionLog, 'skipped', 'insufficient_balance', null, book, orderFlow);
-                return;
-            }
-        } catch { /* proceed anyway, order will fail if no balance */ }
-    }
-
-    // Fee-adjusted metrics for logging
-    const feeShares = computeFeeShares(tradeShares, effectivePrice);
-    const netPayout = computeNetPayout(tradeShares, effectivePrice);
-
-    if (config.dryRun) {
-        const orderId = `sim-dir-${Date.now()}-${tokenId.slice(-6)}`;
-        logger.money(
-            `DIRECTIONAL[SIM]: BUY ${sideName} @ $${effectivePrice} × ${tradeShares}sh | cost $${cost.toFixed(2)} | net payout $${netPayout.toFixed(2)} | "${label}"`
-        );
-        const rec = {
-            asset: asset.toUpperCase(),
-            direction,
-            side: sideName,
-            orderId,
-            price: effectivePrice,
-            shares: tradeShares,
-            cost,
-            confidence,
-            feeShares: Math.round(feeShares * 10000) / 10000,
-            potentialPayout: Math.round(netPayout * 100) / 100,
-        };
-        activeTrades.push(rec);
-        addDailySpend(cost);
-        logTrade(market, predictionLog, 'placed', null, orderId, book, orderFlow, { fundingRate, tradeShares });
+    const book = validateOrderbook(direction === 'UP' ? yesTokenId : noTokenId, await fetchOrderbook(direction === 'UP' ? yesTokenId : noTokenId));
+    if (!book || book.bestAsk > effectivePrice + 0.05) {
+        logTrade(market, predictionLog, 'skipped', 'orderbook_blocked', null, book, orderFlow);
         return;
     }
 
-    // Live order
+    if (!config.dryRun && (await getUsdcBalance()) < cost) {
+        logTrade(market, predictionLog, 'skipped', 'no_balance', null, book, orderFlow);
+        return;
+    }
+
+    // Execution
+    const netPayout = computeNetPayout(tradeShares, effectivePrice);
+    if (config.dryRun) {
+        logger.trade(`DIRECTIONAL[SIM]: BUY ${direction} @ ${effectivePrice} for ${asset}`);
+        logTrade(market, predictionLog, 'placed', 'dry_run', 'sim-' + Date.now(), book, orderFlow, { fundingRate, tradeShares, actualPrice: effectivePrice });
+        return;
+    }
+
     try {
-        const { res, timing } = await submitOrderTimed(
-            {
-                tokenID: tokenId,
-                side: Side.BUY,
-                price: effectivePrice,
-                size: tradeShares,
-            },
-            { tickSize, negRisk },
-            OrderType.GTC,
-        );
+        const { res } = await submitOrderTimed({
+            tokenID: direction === 'UP' ? yesTokenId : noTokenId,
+            side: Side.BUY,
+            price: effectivePrice,
+            size: tradeShares,
+        }, { tickSize, negRisk }, OrderType.GTC);
 
         if (res?.success) {
-            logger.money(
-                `DIRECTIONAL: BUY ${sideName} @ $${effectivePrice} × ${tradeShares}sh | ` +
-                `net payout $${netPayout.toFixed(2)} | order ${res.orderID} | "${label}"`
-            );
-            activeTrades.push({
-                asset: asset.toUpperCase(),
-                direction,
-                side: sideName,
-                orderId: res.orderID,
-                price: effectivePrice,
-                shares: tradeShares,
-                cost,
-                confidence,
-                feeShares: Math.round(feeShares * 10000) / 10000,
-                potentialPayout: Math.round(netPayout * 100) / 100,
-            });
+            logger.money(`DIRECTIONAL: PLACED ${direction} for ${asset} @ ${effectivePrice}`);
+            logTrade(market, predictionLog, 'placed', null, res.orderID, book, orderFlow, { fundingRate, tradeShares, actualPrice: effectivePrice });
             addDailySpend(cost);
-            logTrade(market, predictionLog, 'placed', null, res.orderID, book, orderFlow, { fundingRate, tradeShares });
-            logBalance('directional_order', { direction, orderId: res.orderID, cost }).catch(() => {});
         } else {
-            const errMsg = res?.errorMsg || res?.message || 'unknown';
-            logger.warn(`DIRECTIONAL: order failed — ${errMsg}`);
-            logTrade(market, predictionLog, 'failed', errMsg, null, book, orderFlow, { tradeShares });
+            logTrade(market, predictionLog, 'failed', res?.errorMsg || 'unknown', null, book, orderFlow, { tradeShares, actualPrice: effectivePrice });
         }
     } catch (err) {
-        logger.error(`DIRECTIONAL: order error — ${err.message}`);
-        logTrade(market, predictionLog, 'error', err.message, null, book, orderFlow, { tradeShares });
+        logTrade(market, predictionLog, 'error', err.message, null, book, orderFlow, { tradeShares, actualPrice: effectivePrice });
     }
 }
 
 function logTrade(market, prediction, status, reason, orderId, book, flow, meta = {}) {
-    const price = config.directionalEntryPrice;
+    const price = meta.actualPrice || config.directionalEntryPrice;
     const shares = meta.tradeShares || config.directionalShares;
     const fee = computeFeeShares(shares, price);
     appendOrder({
@@ -438,34 +253,23 @@ function logTrade(market, prediction, status, reason, orderId, book, flow, meta 
         question: (market.question || '').slice(0, 200),
         signal: prediction.signal,
         signalMinutes: prediction.signalMinutes,
-        slotDuration: market.slotDuration || 900,
-        direction: prediction.direction, // "Our Prediction" column
+        direction: prediction.direction, 
         status,
         reason: reason || null,
-        entered: status === 'placed' ? 1 : 0, // "ENTER?" column
+        entered: status === 'placed' ? 1 : 0,
         orderId: orderId || null,
-        price,
+        price, // 🟢 FIXED: logs actual entry price
         shares,
         cost: price * shares,
-        feeShares: Math.round(fee * 10000) / 10000,
-        netPayoutIfWin: Math.round(computeNetPayout(shares, price) * 100) / 100,
         confidence: prediction.confidence ?? null,
         fundingRate: meta.fundingRate ?? null,
-        bestAsk: book?.bestAsk ?? null,
-        bestBid: book?.bestBid ?? null,
-        spread: book?.spread ?? null,
-        askLiquidity: book?.askLiquidity ?? null,
         obi: flow?.obiAvg ?? null,
         cvd: flow?.cvd ?? null,
-        flowTrades: flow?.tradeCount ?? null,
-        dailySpend: getDailySpend(),
         features: prediction.features || {} 
     });
 }
 
 export function cancelAllPending() {
-    for (const [key, timer] of pendingTimers) {
-        clearTimeout(timer);
-    }
+    for (const timer of pendingTimers.values()) clearTimeout(timer);
     pendingTimers.clear();
 }

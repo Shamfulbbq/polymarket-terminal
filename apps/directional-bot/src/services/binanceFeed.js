@@ -1,40 +1,37 @@
 /**
- * binanceFeed.js
- * Real-time BTCUSDT feed from Binance WebSocket.
- *
- * Three streams combined:
- *   1. kline_1m       — 1-minute candles (for momentum, takerBuyRatio signals)
- *   2. aggTrade       — every individual trade (for CVD — Cumulative Volume Delta)
- *   3. depth20@100ms  — top 20 orderbook levels (for OBI — Order Book Imbalance)
+ * binanceFeed.js - MULTI-ASSET VERSION
+ * Real-time feed from Binance WebSocket for BTC, ETH, SOL, etc.
  */
 
 import WebSocket from 'ws';
 import logger from '../utils/logger.js';
+import config from '../config/index.js';
 
-const SYMBOL = 'btcusdt';
-const WS_URL = `wss://stream.binance.com:9443/stream?streams=${SYMBOL}@kline_1m/${SYMBOL}@aggTrade/${SYMBOL}@depth20@100ms`;
-const MAX_CANDLE_BUFFER = 30;
-const MAX_FLOW_SECONDS = 600; // keep 10 minutes of tick data
+const MAX_CANDLE_BUFFER = 60;
+const MAX_FLOW_SECONDS = 600; 
 const RECONNECT_DELAY_MS = 5000;
 
 let ws = null;
 let running = false;
-const candles = [];
-let lastPrice = null;
-let lastCandleTime = null;
 let connectionStatus = 'disconnected';
 
-// ── Order flow state ─────────────────────────────────────────────────────────
+// Multi-asset state
+const state = {};
 
-const aggTrades = [];  // { ts, price, size, isBuy }
-let cvdTotal = 0;
-
-// Latest depth snapshot
-let currentObi = 0;
-let bidVolume = 0;
-let askVolume = 0;
-const obiSnapshots = []; // { ts, obi, bidVol, askVol }
-const MAX_OBI_SNAPSHOTS = 600; // ~60s at 100ms intervals
+function initAssetState(asset) {
+    if (state[asset]) return;
+    state[asset] = {
+        candles: [],
+        aggTrades: [],
+        obiSnapshots: [],
+        cvdTotal: 0,
+        lastPrice: null,
+        lastCandleTime: null,
+        bidVolume: 0,
+        askVolume: 0,
+        currentObi: 0
+    };
+}
 
 // ── Parsers ──────────────────────────────────────────────────────────────────
 
@@ -54,50 +51,52 @@ function parseKline(k) {
     };
 }
 
-function handleKline(data) {
+function handleKline(asset, data) {
+    const s = state[asset];
     const k = data.k;
-    lastPrice = parseFloat(k.c);
+    s.lastPrice = parseFloat(k.c);
     if (k.x) {
         const candle = parseKline(k);
-        candles.push(candle);
-        if (candles.length > MAX_CANDLE_BUFFER) candles.shift();
-        lastCandleTime = new Date(candle.closeTime).toISOString();
+        s.candles.push(candle);
+        if (s.candles.length > MAX_CANDLE_BUFFER) s.candles.shift();
+        s.lastCandleTime = new Date(candle.closeTime).toISOString();
     }
 }
 
-function handleAggTrade(data) {
-    const isBuy = !data.m; // m=true means maker is seller → taker is buyer
+function handleAggTrade(asset, data) {
+    const s = state[asset];
+    const isBuy = !data.m; 
     const size = parseFloat(data.q);
     const price = parseFloat(data.p);
     const ts = data.T || Date.now();
 
-    aggTrades.push({ ts, price, size, isBuy });
-    cvdTotal += isBuy ? size : -size;
-    lastPrice = price;
+    s.aggTrades.push({ ts, price, size, isBuy });
+    s.cvdTotal += isBuy ? size : -size;
+    s.lastPrice = price;
 
-    // Trim old ticks
     const cutoff = Date.now() - MAX_FLOW_SECONDS * 1000;
-    while (aggTrades.length > 0 && aggTrades[0].ts < cutoff) {
-        const old = aggTrades.shift();
-        cvdTotal -= old.isBuy ? old.size : -old.size;
+    while (s.aggTrades.length > 0 && s.aggTrades[0].ts < cutoff) {
+        const old = s.aggTrades.shift();
+        s.cvdTotal -= old.isBuy ? old.size : -old.size;
     }
 }
 
-function handleDepth(data) {
+function handleDepth(asset, data) {
+    const s = state[asset];
     const bids = data.bids || [];
     const asks = data.asks || [];
 
-    bidVolume = 0;
-    askVolume = 0;
-    for (const [, qty] of bids) bidVolume += parseFloat(qty);
-    for (const [, qty] of asks) askVolume += parseFloat(qty);
+    s.bidVolume = 0;
+    s.askVolume = 0;
+    for (const [, qty] of bids) s.bidVolume += parseFloat(qty);
+    for (const [, qty] of asks) s.askVolume += parseFloat(qty);
 
-    const total = bidVolume + askVolume;
-    currentObi = total > 0 ? (bidVolume - askVolume) / total : 0;
+    const total = s.bidVolume + s.askVolume;
+    s.currentObi = total > 0 ? (s.bidVolume - s.askVolume) / total : 0;
 
     const now = Date.now();
-    obiSnapshots.push({ ts: now, obi: currentObi, bidVol: bidVolume, askVol: askVolume });
-    if (obiSnapshots.length > MAX_OBI_SNAPSHOTS) obiSnapshots.shift();
+    s.obiSnapshots.push({ ts: now, obi: s.currentObi, bidVol: s.bidVolume, askVol: s.askVolume });
+    if (s.obiSnapshots.length > 600) s.obiSnapshots.shift();
 }
 
 // ── WebSocket ────────────────────────────────────────────────────────────────
@@ -105,11 +104,21 @@ function handleDepth(data) {
 function connect() {
     if (!running) return;
 
-    ws = new WebSocket(WS_URL);
+    // Build streams for each asset
+    const assets = (config.directionalAsset || 'btc').split(',').map(a => a.trim().toLowerCase());
+    const streams = [];
+    assets.forEach(asset => {
+        initAssetState(asset);
+        const sym = asset === 'btc' ? 'btcusdt' : `${asset}usdt`;
+        streams.push(`${sym}@kline_1m`, `${sym}@aggTrade`, `${sym}@depth20@100ms`);
+    });
+
+    const url = `wss://stream.binance.com:9443/stream?streams=${streams.join('/')}`;
+    ws = new WebSocket(url);
 
     ws.on('open', () => {
         connectionStatus = 'connected';
-        logger.info('BINANCE: WebSocket connected (kline + aggTrade + depth)');
+        logger.info(`BINANCE: Multi-asset WebSocket connected (${assets.join(', ')})`);
     });
 
     ws.on('message', (raw) => {
@@ -119,16 +128,16 @@ function connect() {
             const data = msg.data;
             if (!data) return;
 
-            if (stream.includes('kline'))    handleKline(data);
-            else if (stream.includes('aggTrade')) handleAggTrade(data);
-            else if (stream.includes('depth'))    handleDepth(data);
-        } catch { /* ignore parse errors */ }
+            const asset = stream.split('usdt')[0]; // e.g. "btcusdt@kline" -> "btc"
+            if (stream.includes('kline'))    handleKline(asset, data);
+            else if (stream.includes('aggTrade')) handleAggTrade(asset, data);
+            else if (stream.includes('depth'))    handleDepth(asset, data);
+        } catch { /* ignore */ }
     });
 
     ws.on('close', () => {
         connectionStatus = 'disconnected';
         if (running) {
-            logger.warn(`BINANCE: WebSocket closed — reconnecting in ${RECONNECT_DELAY_MS / 1000}s`);
             setTimeout(connect, RECONNECT_DELAY_MS);
         }
     });
@@ -152,32 +161,26 @@ export function stopBinanceFeed() {
         try { ws.close(); } catch { /* ignore */ }
         ws = null;
     }
-    connectionStatus = 'stopped';
 }
 
-export function getCandlesSince(sinceMs) {
-    return candles.filter((c) => c.openTime >= sinceMs);
+export function getCandlesSince(asset, sinceMs) {
+    const a = asset?.toLowerCase();
+    if (!state[a]) return [];
+    return state[a].candles.filter((c) => c.openTime >= sinceMs);
 }
 
-/**
- * Get the N most recent candles that closed BEFORE a given timestamp.
- * Used to compute pre-market momentum before a market opens.
- */
-export function getCandlesBefore(beforeMs, count = 5) {
-    const before = candles.filter((c) => c.openTime < beforeMs);
+export function getCandlesBefore(asset, beforeMs, count = 5) {
+    const a = asset?.toLowerCase();
+    if (!state[a]) return [];
+    const before = state[a].candles.filter((c) => c.openTime < beforeMs);
     return before.slice(-count);
 }
 
-/**
- * Fetch the latest BTC perpetual futures funding rate from Binance.
- * Negative funding = shorts paying longs = UP bias (shorts squeezed).
- * Positive funding = longs paying shorts = DOWN bias (longs crowded).
- * Returns null on error.
- */
-export async function getBinanceFundingRate() {
+export async function getBinanceFundingRate(asset) {
     try {
+        const sym = (asset?.toLowerCase() === 'btc' ? 'BTC' : asset?.toUpperCase()) + 'USDT';
         const resp = await fetch(
-            'https://fapi.binance.com/fapi/v1/fundingRate?symbol=BTCUSDT&limit=1',
+            `https://fapi.binance.com/fapi/v1/fundingRate?symbol=${sym}&limit=1`,
             { signal: AbortSignal.timeout(3000) },
         );
         if (!resp.ok) return null;
@@ -189,14 +192,13 @@ export async function getBinanceFundingRate() {
     }
 }
 
-/**
- * Get order flow data for a given time window.
- * @param {number} sinceMs — UTC timestamp in milliseconds
- * @returns {{ cvd, buyVol, sellVol, tradeCount, obi, obiAvg, bidVol, askVol }}
- */
-export function getOrderFlowSince(sinceMs) {
+export function getOrderFlowSince(asset, sinceMs) {
+    const a = asset?.toLowerCase();
+    if (!state[a]) return { cvd:0, buyVol:0, sellVol:0, tradeCount:0, obi:0, obiAvg:0 };
+    
+    const s = state[a];
     let buyVol = 0, sellVol = 0, count = 0;
-    for (const t of aggTrades) {
+    for (const t of s.aggTrades) {
         if (t.ts < sinceMs) continue;
         count++;
         if (t.isBuy) buyVol += t.size;
@@ -204,32 +206,32 @@ export function getOrderFlowSince(sinceMs) {
     }
     const cvd = buyVol - sellVol;
 
-    // Average OBI over the window
-    const relevantObi = obiSnapshots.filter(s => s.ts >= sinceMs);
+    const relevantObi = s.obiSnapshots.filter(ss => ss.ts >= sinceMs);
     const obiAvg = relevantObi.length > 0
-        ? relevantObi.reduce((sum, s) => sum + s.obi, 0) / relevantObi.length
-        : currentObi;
+        ? relevantObi.reduce((sum, ss) => sum + ss.obi, 0) / relevantObi.length
+        : s.currentObi;
 
     return {
         cvd,
         buyVol,
         sellVol,
         tradeCount: count,
-        obi: currentObi,
+        obi: s.currentObi,
         obiAvg,
-        bidVol: bidVolume,
-        askVol: askVolume,
+        bidVol: s.bidVolume,
+        askVol: s.askVolume,
     };
 }
 
 export function getBinanceFeedStatus() {
-    return {
-        status: connectionStatus,
-        lastPrice,
-        lastCandleTime,
-        bufferedCandles: candles.length,
-        aggTradeCount: aggTrades.length,
-        cvd: Math.round(cvdTotal * 1000) / 1000,
-        obi: Math.round(currentObi * 1000) / 1000,
-    };
+    const assets = Object.keys(state);
+    const status = { connectionStatus, assets: {} };
+    assets.forEach(a => {
+        status.assets[a] = {
+            lastPrice: state[a].lastPrice,
+            bufferedCandles: state[a].candles.length,
+            cvd: Math.round(state[a].cvdTotal * 100) / 100
+        };
+    });
+    return status;
 }

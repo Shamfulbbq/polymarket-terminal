@@ -160,7 +160,7 @@ async function scheduleSlot(asset, slotTimestamp, isCurrent = false) {
             logger.info(`DIRECTIONAL: current market only ${secsLeft}s left — not enough for ${config.directionalSignalMinutes}min signal`);
             return;
         }
-        logger.success(`DIRECTIONAL: BTC current market active (${secsLeft}s left)`);
+        logger.success(`DIRECTIONAL: ${asset.toUpperCase()} current market active (${secsLeft}s left)`);
         emitMarket(baseData, slotTimestamp, 'current');
     } else {
         scheduleNextMarketHandoff(baseData, slotTimestamp);
@@ -188,7 +188,7 @@ export function startDirectionalDetector(onNewMarket) {
     for (const key of nextMarketTimers.keys()) clearNextMarketTimer(key);
 
     poll();
-    pollTimer = setInterval(poll, config.mmPollInterval);
+    pollTimer = setInterval(poll, config.directionalPollInterval);
 
     const assets = getAssets();
     const ns = nextSlot();

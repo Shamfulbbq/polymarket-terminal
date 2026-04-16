@@ -423,7 +423,7 @@ export function preMomentumComposite(candles, opts = {}) {
     });
 
     if (votes.length < 2 || !direction) {
-        return { direction: direction || 'UP', confidence, features, skipped: true, skipReason: 'insufficient_votes' };
+        return { direction: null, confidence, features, skipped: true, skipReason: 'insufficient_votes' };
     }
 
     return { direction, confidence, features };

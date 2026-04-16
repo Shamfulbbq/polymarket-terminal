@@ -239,6 +239,7 @@ if (config.directionalTimeframes.includes('15m')) {
 // 1H/4H detector (opt-in via DIRECTIONAL_TIMEFRAMES)
 const longTimeframes = config.directionalTimeframes.filter((tf) => tf !== '15m');
 if (longTimeframes.length > 0) {
-    startTimeframeDetector(longTimeframes, [config.directionalAsset], handleNewMarket);
+    const assetsArr = config.directionalAsset.split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+    startTimeframeDetector(longTimeframes, assetsArr, handleNewMarket);
     logger.info(`DIRECTIONAL: long-timeframe detector started — ${longTimeframes.join(', ')}`);
 }
