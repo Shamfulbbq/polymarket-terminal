@@ -3,3 +3,10 @@ node_modules/
 data/*.json
 !data/feeSchedule.json
 .DS_Store
+.gstack/
+
+# btc5m — credentials, virtualenv, raw data, build artifacts
+src/btc5m/.env.btc5m
+src/btc5m/.venv/
+src/btc5m/__pycache__/
+data/btc5m/
