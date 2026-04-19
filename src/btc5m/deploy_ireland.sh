@@ -26,9 +26,9 @@ echo "==> Ensuring remote dirs exist..."
 ssh -i "$KEY" -o StrictHostKeyChecking=no "$HOST" \
   "mkdir -p ${REMOTE_DIR}/src/btc5m ${REMOTE_DIR}/models ${REMOTE_DIR}/data/btc5m"
 
-echo "==> Copying bot.mjs + recorder.mjs + .env.btc5m..."
+echo "==> Copying bot.mjs + recorder.mjs + signal.mjs + .env.btc5m..."
 scp -i "$KEY" -o StrictHostKeyChecking=no \
-  src/btc5m/bot.mjs src/btc5m/recorder.mjs src/btc5m/.env.btc5m \
+  src/btc5m/bot.mjs src/btc5m/recorder.mjs src/btc5m/signal.mjs src/btc5m/.env.btc5m \
   "$HOST:${REMOTE_DIR}/src/btc5m/"
 
 echo "==> Copying trained model + norm params..."

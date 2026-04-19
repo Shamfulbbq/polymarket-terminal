@@ -38,7 +38,8 @@ const MODEL_DIR = path.join(ROOT, 'models');
 const DATA_DIR  = path.join(ROOT, 'data', 'btc5m');
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
-const TRADES_LOG = path.join(DATA_DIR, 'bot_trades.jsonl');
+const TRADES_LOG  = path.join(DATA_DIR, 'bot_trades.jsonl');
+const DAILY_PNL_LOG = path.join(DATA_DIR, 'daily_pnl.jsonl');
 
 // ══════════════════════════════════════════════════════════════════════════════
 // CONFIG
@@ -128,6 +129,7 @@ async function predict(seq) {
             flat.push(v);
         }
     }
+    flat = flat.map(v => Number.isFinite(v) ? v : 0);
     const input = new ort.Tensor('float32', Float32Array.from(flat), [1, SEQ_LEN, NUM_FEATURES]);
     const output = await _session.run({ candles: input });
     const logit = output.logit.data[0];
@@ -522,11 +524,30 @@ async function pollAndHedge() {
 // ══════════════════════════════════════════════════════════════════════════════
 
 let _lastRoundTs = null;
-let _dailyPnl = 0;
 let _dailyDate = new Date().toISOString().slice(0, 10);
+let _dailyPnl = 0;
 // Track open rounds so we can resolve PnL once Chainlink result arrives.
 // Key: slug -> { upRungs, dnRungs, upOpenAsk, dnOpenAsk, resolveAttempts }
 const _pendingResolution = new Map();
+
+// Load today's accumulated PnL from the persistent ledger so a restart doesn't
+// bypass the daily loss limit.
+function loadDailyPnl() {
+    const today = new Date().toISOString().slice(0, 10);
+    _dailyDate = today;
+    _dailyPnl = 0;
+    try {
+        if (!fs.existsSync(DAILY_PNL_LOG)) return;
+        const lines = fs.readFileSync(DAILY_PNL_LOG, 'utf8').trim().split('\n').filter(Boolean);
+        for (const line of lines) {
+            const row = JSON.parse(line);
+            if (row.date === today) _dailyPnl += (row.pnl || 0);
+        }
+        if (_dailyPnl !== 0) logger.info(`btc5m: loaded daily PnL from ledger: ${_dailyPnl.toFixed(2)}`);
+    } catch (e) {
+        logger.warn(`btc5m: failed to load daily PnL ledger — ${e.message}`);
+    }
+}
 
 function resetDailyIfNewUtcDay() {
     const today = new Date().toISOString().slice(0, 10);
@@ -592,6 +613,8 @@ async function resolveAndAccountPnl(slug) {
         const pnl           = netPayout - cost;
         _dailyPnl += pnl;
         _pendingResolution.delete(slug);
+        // Persist this round's PnL so restarts don't bypass the daily loss limit
+        appendJsonl(DAILY_PNL_LOG, { date: _dailyDate, slug, pnl: +pnl.toFixed(4), daily_pnl: +_dailyPnl.toFixed(4), ts: Date.now() });
         appendJsonl(TRADES_LOG, { ts: Date.now(), event: 'resolve', slug,
             winner: upWon ? 'UP' : 'DN',
             filled_up: filledUp.length, filled_dn: filledDn.length,
@@ -748,9 +771,48 @@ function tick() {
 // MAIN
 // ══════════════════════════════════════════════════════════════════════════════
 
+// --test-order: validate live CLOB signing by placing a minimal order, logging the
+// result, cancelling it, then exiting. Run ONCE before going live to confirm the
+// full order path works end-to-end. Never used in DRY_RUN.
+async function runTestOrder() {
+    logger.info('btc5m: --test-order mode — validating live CLOB signing');
+    if (!config.privateKey || !config.proxyWallet) {
+        logger.error('btc5m: PRIVATE_KEY and PROXY_WALLET_ADDRESS required for --test-order');
+        process.exit(1);
+    }
+    await initClient();
+
+    // Use the current round's market — place one $0.01 UP order
+    const roundTs = Math.floor(Date.now() / 1000 / ROUND_SEC) * ROUND_SEC;
+    const slug = `btc-updown-5m-${roundTs}`;
+    const market = await fetchMarketBySlug(slug);
+    if (!market) {
+        logger.error(`btc5m: --test-order could not fetch market ${slug}`);
+        process.exit(1);
+    }
+    logger.info(`btc5m: --test-order market found: ${slug} upToken=${market.upTokenId.slice(0, 12)}...`);
+
+    const testRung = { price: 0.01, shares: 1, side: 'UP' };
+    const orderId = await placeRung(market, market.upTokenId, testRung);
+    if (!orderId || orderId === 'DRY_RUN') {
+        logger.error('btc5m: --test-order FAILED — no order ID returned');
+        process.exit(1);
+    }
+    logger.info(`btc5m: --test-order placed order ${orderId} — cancelling...`);
+    const client = getClient();
+    await client.cancelOrder(orderId);
+    logger.info('btc5m: --test-order PASSED — order placed and cancelled successfully');
+    process.exit(0);
+}
+
 async function main() {
     logger.info(`btc5m: starting execution bot (DRY_RUN=${DRY_RUN})`);
     logger.info(`btc5m: unit_shares=${UNIT_SHARES} max_rungs=${MAX_RUNGS} grid=${GRID_MIN}-${GRID_MAX} step=${GRID_STEP}`);
+
+    if (process.argv.includes('--test-order')) {
+        await runTestOrder();
+        return;
+    }
 
     if (!DRY_RUN) {
         if (!config.privateKey || !config.proxyWallet) {
@@ -762,6 +824,7 @@ async function main() {
         logger.info('btc5m: CLOB client ready');
     }
 
+    loadDailyPnl();
     await loadModel();
     await prefillCandles();
     connectBinance();
