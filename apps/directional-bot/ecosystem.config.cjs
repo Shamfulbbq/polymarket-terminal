@@ -18,7 +18,7 @@ module.exports = {
                 DIRECTIONAL_ETH_SIGNAL: 'orderFlowComposite',
                 
                 // Signal Config
-                DIRECTIONAL_SIGNAL_MINUTES: '10',
+                DIRECTIONAL_SIGNAL_MINUTES: '3',
                 DIRECTIONAL_1H_SIGNAL_MINUTES: '15',
                 
                 // Execution Limits
