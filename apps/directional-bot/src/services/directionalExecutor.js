@@ -96,10 +96,7 @@ export function scheduleDirectionalTrade(market) {
 
     if (signalAtMs >= endAtMs - 30_000) return;
 
-    if (config.directionalBlockedHours.length > 0) {
-        const signalHourUtc = new Date(signalAtMs).getUTCHours();
-        if (config.directionalBlockedHours.includes(signalHourUtc)) return;
-    }
+
 
     const key = `${market.asset}-${market.slotTimestamp}`;
     if (pendingTimers.has(key)) return;
@@ -158,6 +155,16 @@ async function evaluateAndTrade(market, openAtMs, signalMinutes) {
         signal: activeSignal,
         signalMinutes: activeSignalMinutes
     };
+
+    // 🔴 Log but don't trade if hour is blocked
+    if (config.directionalBlockedHours.length > 0) {
+        const signalHourUtc = new Date(Date.now()).getUTCHours();
+        if (config.directionalBlockedHours.includes(signalHourUtc)) {
+            logger.info(`DIRECTIONAL: blocked hour ${signalHourUtc} — logging only for audit`);
+            logTrade(market, predictionLog, 'skipped', 'blocked_hour', null, null, orderFlow);
+            return;
+        }
+    }
 
     // 🔴 HIGH: Fix issue #1 - Explicitly respect signal skipped flag
     if (signalSkipped) {

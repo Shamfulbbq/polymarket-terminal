@@ -66,7 +66,7 @@ export async function runDirectionalResolver() {
                 PNL: 0,
                 CONFIDENT: order.confidence ? Math.round(order.confidence * 100) / 100 : 0,
                 RESOLUTION: '', // Pending
-                'OUR PREDICTION': order.direction || 'UP'
+                'OUR PREDICTION': order.direction || ''
             };
 
             // 2. Load ML features
