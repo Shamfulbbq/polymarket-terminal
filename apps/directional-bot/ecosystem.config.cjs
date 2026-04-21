@@ -14,7 +14,7 @@ module.exports = {
                 DIRECTIONAL_TIMEFRAMES: '15m',
                 
                 // Signal Selection
-                DIRECTIONAL_BTC_SIGNAL: 'momentum',
+                DIRECTIONAL_BTC_SIGNAL: 'preMomentumComposite',
                 DIRECTIONAL_ETH_SIGNAL: 'orderFlowComposite',
                 
                 // Signal Config
