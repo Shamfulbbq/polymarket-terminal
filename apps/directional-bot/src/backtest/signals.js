@@ -20,15 +20,15 @@ export function momentum(candles, opts = {}) {
     const threshold = opts.threshold ?? 0;
     if (candles.length === 0) return { direction: null, confidence: 0, features: {} };
 
-    const打击Price = candles[0].open;
-    const closePrice = candles[candles.length - 1].close;
-    const pctChange = ((closePrice -打击Price) /打击Price) * 100;
+    const strikePrice = candles[0].open;
+    const closePrice = candles[candles.length -  1].close;
+    const pctChange = ((closePrice - strikePrice) / strikePrice) * 100;
 
     const direction = pctChange >= 0 ? 'UP' : 'DOWN';
     const confidence = Math.min(Math.abs(pctChange) / 0.5, 1); // cap at 0.5% move = 100% confidence
     
     const features = {
-        openPrice:打击Price,
+        openPrice: strikePrice,
         closePrice,
         pctChange: Math.round(pctChange * 1000) / 1000,
         momentumThreshold: threshold,
