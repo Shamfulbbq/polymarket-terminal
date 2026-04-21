@@ -36,10 +36,20 @@ function nextSlot() {
 async function fetchBySlug(asset, slotTimestamp) {
     const slug = `${asset}-updown-15m-${slotTimestamp}`;
     try {
-        const resp = await fetch(`${config.gammaHost}/markets/slug/${slug}`);
-        if (!resp.ok) return null;
-        const data = await resp.json();
-        return data?.conditionId ? data : null;
+        let resp = await fetch(`${config.gammaHost}/markets/slug/${slug}`);
+        if (resp.ok) {
+            const data = await resp.json();
+            if (data?.conditionId) return data;
+        }
+
+        resp = await fetch(`${config.gammaHost}/events?slug=${slug}`);
+        if (resp.ok) {
+            const data = await resp.json();
+            if (Array.isArray(data) && data.length > 0 && data[0].markets && data[0].markets.length > 0) {
+                return data[0].markets[0];
+            }
+        }
+        return null;
     } catch {
         return null;
     }

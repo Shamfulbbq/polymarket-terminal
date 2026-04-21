@@ -29,12 +29,24 @@ function currentSlot(slotSec) {
 async function fetchBySlug(asset, label, slotTimestamp) {
     const slug = `${asset}-updown-${label}-${slotTimestamp}`;
     try {
-        const resp = await fetch(`${config.gammaHost}/markets/slug/${slug}`, {
+        let resp = await fetch(`${config.gammaHost}/markets/slug/${slug}`, {
             signal: AbortSignal.timeout(10000),
         });
-        if (!resp.ok) return null;
-        const data = await resp.json();
-        return data?.conditionId ? data : null;
+        if (resp.ok) {
+            const data = await resp.json();
+            if (data?.conditionId) return data;
+        }
+
+        resp = await fetch(`${config.gammaHost}/events?slug=${slug}`, {
+            signal: AbortSignal.timeout(10000),
+        });
+        if (resp.ok) {
+            const data = await resp.json();
+            if (Array.isArray(data) && data.length > 0 && data[0].markets && data[0].markets.length > 0) {
+                return data[0].markets[0];
+            }
+        }
+        return null;
     } catch { return null; }
 }
 
