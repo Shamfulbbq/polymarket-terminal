@@ -180,6 +180,7 @@ async function scheduleSlot(asset, slotTimestamp, isCurrent = false) {
 async function poll() {
     const assets = getAssets();
     const slots = [currentSlot(), nextSlot()];
+    logger.info(`DIRECTIONAL: status check — ${assets.join(', ')} — polling slots [${slots.join(', ')}]`);
     const tasks = [];
     for (const asset of assets) {
         tasks.push(scheduleSlot(asset, slots[0], true));

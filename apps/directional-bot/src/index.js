@@ -33,8 +33,12 @@ try {
 
 // ── Init TUI ──────────────────────────────────────────────────────────────────
 
-initDashboard();
-logger.setOutput(appendLog);
+if (process.env.DIRECTIONAL_NO_TUI !== 'true') {
+    initDashboard();
+    logger.setOutput(appendLog);
+} else {
+    logger.info('DIRECTIONAL: TUI disabled, logging to stdout');
+}
 
 // ── Init CLOB client ──────────────────────────────────────────────────────────
 

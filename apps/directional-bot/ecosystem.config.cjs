@@ -29,7 +29,8 @@ module.exports = {
                 
                 // Safety
                 DIRECTIONAL_DAILY_LOSS_LIMIT: '50',
-                DIRECTIONAL_BLOCKED_HOURS: '0,3,8,12,14,15,19,22'
+                DIRECTIONAL_BLOCKED_HOURS: '0,3,8,12,14,15,19,22',
+                DIRECTIONAL_NO_TUI: 'true'
             }
         }
     ]
