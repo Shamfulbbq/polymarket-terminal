@@ -23,8 +23,8 @@ module.exports = {
                 
                 // Execution Limits
                 DIRECTIONAL_SHARES: '10',
-                DIRECTIONAL_MIN_CONFIDENCE: '0.50',
-                DIRECTIONAL_ENTRY_PRICE: '0.65',
+                DIRECTIONAL_MIN_CONFIDENCE: '0.55',
+                DIRECTIONAL_ENTRY_PRICE: '0.6',
                 DIRECTIONAL_MAX_ENTRY_PRICE: '0.75',
                 
                 // Safety
