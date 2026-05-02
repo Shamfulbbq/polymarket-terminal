@@ -44,6 +44,8 @@
     "stale-sniper": "cross-env DRY_RUN=false node src/staleSniper.js",
     "stale-sniper-sim": "cross-env DRY_RUN=true node src/staleSniper.js",
     "cmm-analysis": "node scripts/cmm-analysis.js",
+    "btc5m-v7": "BTC5M_DRY_RUN=true node src/btc5m/bot_v7.mjs",
+    "btc5m-v7:live": "BTC5M_DRY_RUN=false node src/btc5m/bot_v7.mjs",
     "test": "node test/kelly.test.js && node test/lp-scoring.test.js && node test/feeSchedule.test.js && node test/cmm-analysis.test.js"
   },
   "keywords": [
@@ -56,6 +58,7 @@
   "dependencies": {
     "@google/genai": "^1.46.0",
     "@polymarket/clob-client": "^4.7.3",
+    "@polymarket/clob-client-v2": "1.0.0",
     "blessed": "^0.1.81",
     "dotenv": "^16.4.7",
     "ethers": "^5.8.0",
@@ -66,5 +69,8 @@
   "devDependencies": {
     "cross-env": "^10.1.0",
     "nodemon": "^3.1.9"
+  },
+  "overrides": {
+    "axios": "1.13.5"
   }
 }
